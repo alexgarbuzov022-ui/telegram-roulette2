@@ -1,4 +1,4 @@
-import asyncio, hashlib, hmac, html, json, os, secrets, sqlite3, time, uuid
+import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -68,16 +68,16 @@ def init_db():
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS admins(telegram_id INTEGER PRIMARY KEY, added_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
-    cur = c.execute("SELECT COUNT(*) n FROM prizes")
-    if cur.fetchone()["n"] == 0:
-        seeds = [
+        cur = c.execute("SELECT COUNT(*) n FROM prizes")
+        if cur.fetchone()["n"] == 0:
+            seeds = [
                 ("points5","5 баллов","Небольшой бонус","", "Обычный",45,5,"points",""),
                 ("points10","10 баллов","Бонус","", "Редкий",28,10,"points",""),
                 ("points25","25 баллов","Крупный бонус","", "Эпический",15,25,"points",""),
                 ("points100","100 баллов","Большой бонус","", "Легендарный",5,100,"points",""),
                 ("tryagain","Ещё повезёт","Попробуй снова","", "Мифический",7,0,"points","")
             ]
-        c.executemany("INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value) VALUES(?,?,?,?,?,?,?,?,?)", seeds)
+            c.executemany("INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value) VALUES(?,?,?,?,?,?,?,?,?)", seeds)
 
 def audit(admin_id, action, details=""):
     with db() as c:
@@ -255,7 +255,6 @@ async def broadcast(payload: dict, authorization: str|None=Header(default=None))
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎟 Купить вращения",callback_data="shop")],
-        [InlineKeyboardButton(text="🎁 Получить призы",callback_data="get_prizes")],
         [InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))]
     ])
 
@@ -271,37 +270,6 @@ async def start(m: Message):
 @dp.message(Command("paysupport"))
 async def paysupport(m: Message):
     await m.answer("По вопросам оплаты напиши владельцу бота и укажи дату и сумму платежа.")
-
-@dp.callback_query(F.data=="get_prizes")
-async def get_prizes(cb):
-    uid = cb.from_user.id
-    with db() as c:
-        rows = c.execute("""SELECT s.prize_label, s.rarity, s.created_at, p.description,
-                                  p.prize_type, p.delivery_value
-                           FROM spins s LEFT JOIN prizes p ON p.id=s.prize_id
-                           WHERE s.telegram_id=?
-                           ORDER BY s.id DESC LIMIT 20""", (uid,)).fetchall()
-    if not rows:
-        await cb.message.answer(
-            "🎁 Пока у тебя нет выигранных призов. Открой рулетку и попробуй удачу!",
-            reply_markup=keyboard())
-        await cb.answer()
-        return
-    lines = ["🎁 <b>Твои последние выигрыши</b>", ""]
-    for i, r in enumerate(rows, 1):
-        name = html.escape(str(r["prize_label"] or "Приз")[:150])
-        rarity = html.escape(str(r["rarity"] or "")[:60])
-        desc = html.escape(str(r["description"] or "").strip()[:300])
-        delivery = html.escape(str(r["delivery_value"] or "").strip()[:300])
-        lines.append(f"{i}. <b>{name}</b>" + (f" — {rarity}" if rarity else ""))
-        if desc:
-            lines.append(desc)
-        if delivery:
-            lines.append(f"Информация о получении: {delivery}")
-        lines.append("")
-    lines.append("Если для приза нужно уточнить получение, ответь на это сообщение и напиши, какой приз хочешь получить.")
-    await cb.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=keyboard())
-    await cb.answer()
 
 @dp.callback_query(F.data=="shop")
 async def shop(cb):
