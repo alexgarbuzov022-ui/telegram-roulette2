@@ -268,11 +268,11 @@ async def spin(authorization: str|None=Header(default=None)):
         # literal percentages because they sum to 153%. Treat them as relative
         # odds and normalize over the rarity tiers that actually have enabled prizes.
         rarity_weights = {
-            "обычный": 70.0, "common": 70.0,
-            "редкий": 45.0, "rare": 45.0,
-            "эпический": 25.0, "эпическая": 25.0, "epic": 25.0,
-            "легендарный": 10.0, "легендарная": 10.0, "legendary": 10.0,
-            "мифический": 3.0, "мифическая": 3.0, "mythic": 3.0, "mythical": 3.0,
+            "обычный": 58.0, "common": 58.0,
+            "редкий": 30.0, "rare": 30.0,
+            "эпический": 8.0, "эпическая": 8.0, "epic": 8.0,
+            "легендарный": 2.0, "легендарная": 2.0, "legendary": 2.0,
+            "мифический": 2.0, "мифическая": 2.0, "mythic": 2.0, "mythical": 2.0,
         }
         def rarity_key(prize):
             return str(prize["rarity"] or "обычный").strip().lower()
@@ -316,21 +316,20 @@ async def spin(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         delivery_payload = chosen["delivery_value"] or ""
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
-        # Pick one random photo/video for THIS win and store it in the spin row.
-        # Claiming the prize later sends that exact file; repeated wins may pick different files.
-        valid_media = [
-            x for x in media_files
-            if isinstance(x, dict) and str(x.get("url", "")).strip()
-            and str(x.get("type", "")).lower() in {"photo", "image", "video"}
-        ]
-        if valid_media:
-            picked_media = secrets.choice(valid_media)
-            media_type = str(picked_media.get("type", "")).lower()
+        # Keep the complete prize pack (e.g. all 3 photos) for this win.
+        # Randomize order on every win so media is not always delivered sequentially.
+        valid_media = []
+        for item in media_files:
+            if not isinstance(item, dict) or not str(item.get("url", "")).strip():
+                continue
+            media_type = str(item.get("type", "")).lower().strip()
             if media_type == "image":
                 media_type = "photo"
-            delivery_payload = json.dumps({
-                "media_files": [{"url": str(picked_media["url"]).strip(), "type": media_type}]
-            }, ensure_ascii=False)
+            if media_type in {"photo", "video"}:
+                valid_media.append({"url": str(item["url"]).strip(), "type": media_type})
+        if valid_media:
+            secrets.SystemRandom().shuffle(valid_media)
+            delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
         elif str(chosen["image"] or "").strip() and not str(delivery_payload).strip():
             delivery_payload = json.dumps({
                 "media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]
@@ -594,7 +593,8 @@ def keyboard():
 
 def reply_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")]
+        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🎁 Мои призы")]
     ], resize_keyboard=True, is_persistent=True)
 
 PACKS = {1:50, 3:120, 10:400}
