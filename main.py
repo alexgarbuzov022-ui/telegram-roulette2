@@ -277,12 +277,16 @@ async def spin(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
-        delivery_payload = chosen["delivery_value"] or ""
+        delivery_payload = (chosen["delivery_value"] or "").strip()
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
         if media_files:
             delivery_payload = json.dumps({"media_files": media_files}, ensure_ascii=False)
+        # If no separate delivery content is set but the prize has an image/file_id,
+        # allow the user to claim that image from the bot instead of hiding the win.
+        if not delivery_payload and (chosen["image"] or "").strip():
+            delivery_payload = json.dumps({"media_files": [{"url": chosen["image"].strip(), "type": "photo"}]}, ensure_ascii=False)
         c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload else 1))
     # Notify all configured admins about every win (including wins by admins).
     try:
         with db() as c:
@@ -540,7 +544,8 @@ def keyboard():
 
 def reply_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")]
+        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🎁 Мои призы")]
     ], resize_keyboard=True, is_persistent=True)
 
 PACKS = {1:50, 3:120, 10:400}
@@ -619,10 +624,12 @@ async def send_my_prizes(chat_id: int, uid: int):
     for r in rows:
         text=f"🎁 {r['prize_label']}\nРедкость: {r['rarity']}\nВыигран: {r['created_at']}"
         if r['image']:
-            try: await bot.send_photo(chat_id,r['image'],caption=text)
-            except Exception: await bot.send_message(chat_id,text)
+            try:
+                await bot.send_photo(chat_id, r['image'], caption=text)
+            except Exception:
+                await bot.send_message(chat_id, text)
         else:
-            await bot.send_message(chat_id,text)
+            await bot.send_message(chat_id, text)
         await bot.send_message(chat_id,"Нажми, чтобы получить приз:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🎁 Получить: {r['prize_label'][:35]}",callback_data=f"claim:{r['id']}")]]))
 
 @dp.callback_query(F.data.startswith("claim:"))
@@ -652,8 +659,10 @@ async def claim_prize(cb):
         except (ValueError, TypeError):
             pass
         if media_payload:
-            photos = [x["url"] for x in media_payload if x.get("type") == "photo" and x.get("url")]
-            videos = [x["url"] for x in media_payload if x.get("type") == "video" and x.get("url")]
+            photos = [x["url"] for x in media_payload if x.get("type") in {"photo", "image", "картинка", "фото"} and x.get("url")]
+            videos = [x["url"] for x in media_payload if x.get("type") in {"video", "видео"} and x.get("url")]
+            notes = [x["url"] for x in media_payload if x.get("type") in {"video_note", "кружок"} and x.get("url")]
+            links = [x["url"] for x in media_payload if x.get("type") in {"link", "url", "ссылка", "text", "текст"} and x.get("url")]
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
             # Telegram media groups accept up to 10 items; send larger collections in batches.
             for start in range(0, len(photos), 10):
@@ -662,6 +671,12 @@ async def claim_prize(cb):
                 await bot.send_media_group(cb.from_user.id, media)
             for url in videos:
                 await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
+            for url in notes:
+                await bot.send_video_note(cb.from_user.id, url)
+            for url in links:
+                await bot.send_message(cb.from_user.id, f"🎁 {row['prize_label']}\n{url}", disable_web_page_preview=False)
+            if not (photos or videos or notes or links):
+                raise ValueError("В настройках приза нет поддерживаемых файлов")
         elif kind in {"photo","image","картинка","фото"}:
             await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video","видео"}:
