@@ -569,8 +569,9 @@ async def start(m: Message):
     await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.\n\n"
                    "👥 Приглашай друзей: за первую подтверждённую покупку друга получишь 3 вращения.\n"
                    f"Твоя ссылка: {referral_link}", reply_markup=reply_menu())
-    await m.answer("Нажми, чтобы открыть рулетку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]
+    await m.answer("Выбери действие:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 Открыть рулетку", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(text="🎁 Мои призы / Получить призы", callback_data="myprizes")]
     ]))
 
 @dp.message(F.text == "💳 Оплата")
@@ -597,6 +598,10 @@ async def menu_buy(m: Message):
 
 @dp.message(F.text == "🎁 Мои призы")
 async def menu_prizes(m: Message):
+    await send_my_prizes(m.chat.id, m.from_user.id)
+
+@dp.message(Command("myprizes"))
+async def menu_prizes_command(m: Message):
     await send_my_prizes(m.chat.id, m.from_user.id)
 
 @dp.callback_query(F.data == "myprizes")
