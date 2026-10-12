@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -46,7 +46,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(
           telegram_id INTEGER PRIMARY KEY, spins INTEGER NOT NULL DEFAULT 0 CHECK(spins>=0),
           points INTEGER NOT NULL DEFAULT 0 CHECK(points>=0), referred_by INTEGER,
-          referral_paid INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+          referral_paid INTEGER NOT NULL DEFAULT 0, test_used INTEGER NOT NULL DEFAULT 0, streak_current INTEGER NOT NULL DEFAULT 0, streak_best INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS prizes(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', image TEXT DEFAULT '',
           rarity TEXT NOT NULL DEFAULT 'Обычный', weight REAL NOT NULL DEFAULT 1,
@@ -67,8 +67,12 @@ def init_db():
           id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL, method TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS admins(telegram_id INTEGER PRIMARY KEY, added_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS deleted_prizes(id INTEGER PRIMARY KEY AUTOINCREMENT, prize_json TEXT NOT NULL, deleted_by INTEGER, deleted_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
         # Migrate existing installations without deleting user data.
+        user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+        for col, definition in [("test_used", "INTEGER NOT NULL DEFAULT 0"), ("streak_current", "INTEGER NOT NULL DEFAULT 0"), ("streak_best", "INTEGER NOT NULL DEFAULT 0")]:
+            if col not in user_cols: c.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
         spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
         if "prize_type" not in spin_cols:
             c.execute("ALTER TABLE spins ADD COLUMN prize_type TEXT NOT NULL DEFAULT 'points'")
@@ -76,19 +80,43 @@ def init_db():
             c.execute("ALTER TABLE spins ADD COLUMN delivery_value TEXT DEFAULT ''")
         if "claimed" not in spin_cols:
             c.execute("ALTER TABLE spins ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
+        if "test_mode" not in spin_cols:
+            c.execute("ALTER TABLE spins ADD COLUMN test_mode INTEGER NOT NULL DEFAULT 0")
         prize_cols = {r["name"] for r in c.execute("PRAGMA table_info(prizes)").fetchall()}
         if "media_files" not in prize_cols:
             c.execute("ALTER TABLE prizes ADD COLUMN media_files TEXT NOT NULL DEFAULT '[]'")
-        cur = c.execute("SELECT COUNT(*) n FROM prizes")
-        if cur.fetchone()["n"] == 0:
-            seeds = [
-                ("points5","5 баллов","Небольшой бонус","", "Обычный",45,5,"points",""),
-                ("points10","10 баллов","Бонус","", "Редкий",28,10,"points",""),
-                ("points25","25 баллов","Крупный бонус","", "Эпический",15,25,"points",""),
-                ("points100","100 баллов","Большой бонус","", "Легендарный",5,100,"points",""),
-                ("tryagain","Ещё повезёт","Попробуй снова","", "Мифический",7,0,"points","")
-            ]
-            c.executemany("INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value) VALUES(?,?,?,?,?,?,?,?,?)", seeds)
+        # Add/update only the built-in starter prizes. Existing user-created prizes and
+        # uploaded media are preserved; this migration is safe to run on every startup.
+        starter_prizes = [
+            ("photo1", "1 фото модели", "Одно фото из твоей коллекции. Загрузи фото в редакторе приза.", "", "Обычный", 50, 0, "media_group", "[]"),
+            ("photo3", "Набор из 3 фото", "Три разных фото модели. Добавь 3 файла в медиа приза.", "", "Обычный", 20, 0, "media_group", "[]"),
+            ("photo5", "Набор из 5 фото", "Пять фото модели.", "", "Редкий", 10, 0, "media_group", "[]"),
+            ("photo10", "Набор из 10 фото", "Десять фото модели.", "", "Редкий", 5, 0, "media_group", "[]"),
+            ("video1", "Видео модели", "Одно видео. Добавь видео в медиа приза или укажи Telegram file_id.", "", "Редкий", 8, 0, "video", ""),
+            ("video_exclusive", "Эксклюзивное видео", "Особое видео модели.", "", "Эпический", 3, 0, "video", ""),
+            ("private_week", "Приватный канал — 1 неделя", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Эпический", 2, 0, "link", ""),
+            ("private_month", "Приватный канал — 1 месяц", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 1, 0, "link", ""),
+            ("private_3months", "Приватный канал — 3 месяца", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 0.5, 0, "link", ""),
+            ("private_forever", "Приватный канал — навсегда", "Самый редкий приз. Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Мифический", 0.1, 0, "link", ""),
+            ("private_discount10", "Скидка 10% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Обычный", 8, 0, "text", ""),
+            ("private_discount25", "Скидка 25% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Редкий", 3, 0, "text", ""),
+            ("private_discount50", "Скидка 50% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Эпический", 1, 0, "text", ""),
+            ("circle_dm", "Кружок в личные сообщения", "Добавь видео-кружок или file_id в медиа приза.", "", "Редкий", 3, 0, "video_note", ""),
+            ("video_face", "Видео с лицом", "Добавь видео в медиа приза.", "", "Редкий", 4, 0, "video", ""),
+            ("video_no_face", "Видео без лица", "Добавь видео в медиа приза.", "", "Обычный", 7, 0, "video", ""),
+            ("video_pack3", "Пакет из 3 видео", "Добавь три видео в медиа приза; бот отправит их все.", "", "Эпический", 1.5, 0, "media_group", ""),
+            ("rating_member", "Оценка члена", "Очень редкий приз. Администратор укажет способ получения в личных сообщениях.", "", "Мифический", 0.1, 0, "text", ""),
+            ("bonus_spin1", "+1 дополнительное вращение", "Вращение начисляется автоматически.", "", "Обычный", 12, 1, "spins", ""),
+            ("bonus_spin2", "+2 дополнительных вращения", "Вращения начисляются автоматически.", "", "Редкий", 5, 2, "spins", ""),
+            ("bonus_spin3", "+3 дополнительных вращения", "Вращения начисляются автоматически.", "", "Эпический", 2, 3, "spins", "")
+        ]
+        # Replace only the old bundled sample IDs, never arbitrary/custom prizes.
+        legacy_ids = {"points5", "points10", "points25", "points100", "tryagain"}
+        for pid in legacy_ids:
+            c.execute("DELETE FROM prizes WHERE id=?", (pid,))
+        for prize in starter_prizes:
+            c.execute("""INSERT OR IGNORE INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""", prize)
 
 def audit(admin_id, action, details=""):
     with db() as c:
@@ -110,6 +138,14 @@ def uid_from_header(auth):
     if not auth or not auth.startswith("tma "): raise HTTPException(401, "Открой Mini App из Telegram")
     try: return int(validate_init_data(auth[4:])["id"])
     except Exception: raise HTTPException(401, "Сессия Telegram недействительна. Открой Mini App заново.")
+
+def admin_ids_all():
+    ids=set(ADMIN_IDS)
+    try:
+        with db() as c:
+            ids.update(int(r["telegram_id"]) for r in c.execute("SELECT telegram_id FROM admins").fetchall())
+    except Exception: pass
+    return ids
 
 def is_admin(uid):
     if uid in ADMIN_IDS: return True
@@ -147,7 +183,10 @@ async def me(authorization: str|None=Header(default=None)):
         hist = c.execute("SELECT prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
+        streak = c.execute("SELECT streak_current,streak_best,test_used FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        wins_total = c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=? AND test_mode=0", (uid,)).fetchone()["n"]
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
+            "streak_current":streak["streak_current"],"streak_best":streak["streak_best"],"test_used":bool(streak["test_used"]),"wins_total":wins_total,
             "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"]} for r in hist],
             "payments":[dict(r) for r in pays],"referrals":referrals,"is_admin":is_admin(uid)}
 
@@ -195,7 +234,10 @@ async def spin(authorization: str|None=Header(default=None)):
         for r in rows:
             acc += float(r["weight"])
             if n < acc: chosen = r; break
-        if admin_free:
+        if chosen["prize_type"] == "spins":
+            bonus_spins = max(0, int(chosen["points"] or 0))
+            c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
+        elif admin_free:
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
@@ -203,11 +245,111 @@ async def spin(authorization: str|None=Header(default=None)):
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
         if media_files:
             delivery_payload = json.dumps({"media_files": media_files}, ensure_ascii=False)
-        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
+        is_rare = chosen["rarity"] in {"Редкий", "Эпический", "Легендарный", "Мифический"}
+        userrow = c.execute("SELECT streak_current,streak_best FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        streak_now = int(userrow["streak_current"] or 0) + 1 if is_rare else 0
+        streak_best = max(int(userrow["streak_best"] or 0), streak_now)
+        c.execute("UPDATE users SET streak_current=?,streak_best=? WHERE telegram_id=?", (streak_now,streak_best,uid))
+        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed,test_mode) VALUES(?,?,?,?,?,?,?,?,?,0)",
                   (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+    # Notify all configured admins about every win (including wins by admins).
+    try:
+        with db() as c:
+            winner=c.execute("SELECT telegram_id FROM users WHERE telegram_id=?",(uid,)).fetchone()
+        uname=""
+        # username is supplied by Telegram WebApp initData, stored from the validated user payload when possible.
+        for admin_id in admin_ids_all():
+            try:
+                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\nПользователь: {uid}\nПриз: {chosen['name']}\nРедкость: {chosen['rarity']}\nБаллы: {chosen['points']}\nID приза: {chosen['id']}")
+            except Exception: pass
+    except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"rarity":chosen["rarity"],"image":chosen["image"],
-            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
+            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable,
+            "streak_current":streak_now,"streak_best":streak_best,"streak_message":(f"🔥 Серия редких призов: {streak_now}!" if is_rare and streak_now>=2 else "")}
+
+@app.post("/api/test-spin")
+async def test_spin(authorization: str|None=Header(default=None)):
+    """One free preview spin per user. Does not spend spins, award bonuses, or notify admins."""
+    uid = uid_from_header(authorization)
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+        user = c.execute("SELECT test_used FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        if user["test_used"]:
+            raise HTTPException(409, "Тестовое вращение уже использовано")
+        rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
+        if not rows: raise HTTPException(500, "Нет активных призов")
+        total = sum(float(r["weight"]) for r in rows)
+        roll = secrets.randbelow(10**9)/10**9*total
+        chosen=rows[-1]; acc=0.0
+        for r in rows:
+            acc += float(r["weight"])
+            if roll < acc: chosen=r; break
+        c.execute("UPDATE users SET test_used=1 WHERE telegram_id=?", (uid,))
+        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed,test_mode) VALUES(?,?,?,?,?,?,?,?,1,1)",
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],0,chosen["prize_type"],""))
+    return {"test_mode":True,"prize":chosen["name"],"prize_id":chosen["id"],"rarity":chosen["rarity"],"image":chosen["image"],"claimable":False,"description":"Демо-результат. Реальный приз не выдан."}
+
+@app.get("/api/payment-options")
+async def payment_options(authorization: str|None=Header(default=None)):
+    uid = uid_from_header(authorization)
+    return {"rub_per_star":RUB_PER_STAR,"card_details":CARD_PAYMENT_DETAILS,"ton_wallet":TON_WALLET_ADDRESS,
+            "packs":[{"spins":n,"stars":price,"rub":price*RUB_PER_STAR} for n,price in PACKS.items()]}
+
+@app.post("/api/payment-receipt")
+async def upload_payment_receipt(file: UploadFile=File(...), authorization: str|None=Header(default=None)):
+    uid=uid_from_header(authorization)
+    if not file.content_type or not (file.content_type.startswith("image/") or file.content_type=="application/pdf"):
+        raise HTTPException(400,"Чек должен быть изображением или PDF")
+    data=await file.read()
+    if not data or len(data)>10*1024*1024: raise HTTPException(413,"Чек должен быть не больше 10 МБ")
+    ext={"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif","application/pdf":".pdf"}.get(file.content_type)
+    if not ext: raise HTTPException(400,"Поддерживаются JPG, PNG, WEBP или PDF")
+    folder=BASE/"uploads"; folder.mkdir(exist_ok=True)
+    name="receipt_"+uuid.uuid4().hex+ext
+    (folder/name).write_bytes(data)
+    return {"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name}
+
+@app.post("/api/payment-orders")
+async def create_payment_order(payload: dict, authorization: str|None=Header(default=None)):
+    uid = uid_from_header(authorization)
+    try: n=int(payload.get("spins",0))
+    except (TypeError,ValueError): raise HTTPException(400,"Неверный пакет")
+    method=str(payload.get("method",""))
+    if n not in PACKS: raise HTTPException(400,"Такого набора нет")
+    if method not in {"card","ton"}: raise HTTPException(400,"Выбери способ оплаты")
+    proof=str(payload.get("proof","чек будет отправлен отдельно"))[:1500].strip()
+    oid=uuid.uuid4().hex[:12]
+    details=json.dumps({"spins":n,"stars":PACKS[n],"rub":PACKS[n]*RUB_PER_STAR,"proof":proof},ensure_ascii=False)
+    with db() as c:
+        c.execute("INSERT INTO orders(id,telegram_id,method,status,details) VALUES(?,?,?,'pending',?)",(oid,uid,method,details))
+    user_tag=f"@{payload.get('username')}" if payload.get("username") else "без username"
+    keyboard=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"payok:{oid}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"payno:{oid}")
+    ]])
+    receipt_path=None
+    # If the user uploaded a receipt, keep its URL in order details and send the actual file to admins.
+    for token in proof.split():
+        if "/uploads/receipt_" in token:
+            candidate=BASE/"uploads"/token.split("/uploads/",1)[1].split("?",1)[0]
+            if candidate.is_file():
+                receipt_path=candidate
+                break
+    for admin_id in admin_ids_all():
+        try:
+            summary=(f"🧾 Новая заявка на оплату\nПользователь: {uid} ({user_tag})\n"
+                     f"Пакет: {n} вращений\nСумма: {PACKS[n]*RUB_PER_STAR} ₽ ({PACKS[n]} ⭐ эквивалент)\n"
+                     f"Метод: {'банковская карта' if method=='card' else 'TON'}\n"
+                     f"Комментарий/чек: {proof}\nЗаявка: {oid}\n\nПроверь поступление денег перед подтверждением.")
+            if receipt_path:
+                await bot.send_document(admin_id, FSInputFile(str(receipt_path)), caption=summary, reply_markup=keyboard)
+            else:
+                await bot.send_message(admin_id, summary+"\n⚠️ Файл чека не приложен.", reply_markup=keyboard)
+        except Exception as e:
+            print(f"Could not notify admin {admin_id} about order {oid}: {e}")
+    return {"ok":True,"order_id":oid,"status":"pending","rub":PACKS[n]*RUB_PER_STAR}
 
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
@@ -218,7 +360,12 @@ async def admin_overview(authorization: str|None=Header(default=None)):
         users = c.execute("SELECT telegram_id,spins,points,created_at FROM users ORDER BY created_at DESC LIMIT 100").fetchall()
         logs = c.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 100").fetchall()
         admins = c.execute("SELECT telegram_id FROM admins").fetchall()
-    return {"prizes":[prize_dict(r) for r in ps],"orders":[dict(r) for r in orders],
+        stats = {"users":c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"],
+                 "spins":c.execute("SELECT COUNT(*) n FROM spins WHERE test_mode=0").fetchone()["n"],
+                 "test_spins":c.execute("SELECT COUNT(*) n FROM spins WHERE test_mode=1").fetchone()["n"],
+                 "pending_orders":c.execute("SELECT COUNT(*) n FROM orders WHERE status='pending'").fetchone()["n"],
+                 "rare_wins":c.execute("SELECT COUNT(*) n FROM spins WHERE test_mode=0 AND rarity IN ('Редкий','Эпический','Легендарный','Мифический')").fetchone()["n"]}
+    return {"stats":stats,"prizes":[prize_dict(r) for r in ps],"orders":[dict(r) for r in orders],
             "users":[dict(r) for r in users],"audit":[dict(r) for r in logs],
             "admins":[r["telegram_id"] for r in admins],"owner_ids":sorted(ADMIN_IDS)}
 
@@ -249,12 +396,28 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
 async def delete_prize(pid: str, authorization: str|None=Header(default=None)):
     uid = require_admin(authorization)
     with db() as c:
-        row = c.execute("SELECT name FROM prizes WHERE id=?", (pid,)).fetchone()
+        row = c.execute("SELECT * FROM prizes WHERE id=?", (pid,)).fetchone()
         if not row:
             raise HTTPException(404, "Приз не найден")
+        snapshot=json.dumps(dict(row),ensure_ascii=False)
+        c.execute("INSERT INTO deleted_prizes(prize_json,deleted_by) VALUES(?,?)",(snapshot,uid))
         c.execute("DELETE FROM prizes WHERE id=?", (pid,))
     audit(uid,"delete_prize",f"{pid}: {row['name']}")
     return {"ok":True}
+
+@app.post("/api/admin/undo-delete")
+async def undo_delete_prize(authorization: str|None=Header(default=None)):
+    uid=require_admin(authorization)
+    with db() as c:
+        snap=c.execute("SELECT * FROM deleted_prizes ORDER BY id DESC LIMIT 1").fetchone()
+        if not snap: raise HTTPException(404,"Нет удалённого приза для восстановления")
+        prize=json.loads(snap["prize_json"])
+        columns=["id","name","description","image","rarity","weight","points","prize_type","delivery_value","media_files","enabled","created_at"]
+        vals=[prize.get(k) for k in columns]
+        c.execute("INSERT INTO prizes("+",".join(columns)+") VALUES("+",".join(["?"]*len(columns))+")",vals)
+        c.execute("DELETE FROM deleted_prizes WHERE id=?",(snap["id"],))
+    audit(uid,"undo_delete",str(prize.get("id","")))
+    return {"ok":True,"name":prize.get("name","")}
 
 @app.post("/api/admin/upload")
 async def upload_image(file: UploadFile=File(...), authorization: str|None=Header(default=None)):
@@ -298,9 +461,30 @@ async def approve_order(oid: str, authorization: str|None=Header(default=None)):
         row = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
         if not row: raise HTTPException(404,"Заявка не найдена")
         if row["status"]!="pending": return {"ok":True,"status":row["status"]}
-        c.execute("UPDATE orders SET status='approved' WHERE id=?", (oid,))
+        try: info=json.loads(row["details"] or "{}")
+        except Exception: info={}
+        spins=int(info.get("spins",0))
+        if spins not in PACKS: raise HTTPException(400,"В заявке указан неизвестный пакет")
+        c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'", (oid,))
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
+        c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
     audit(uid,"approve_order",oid)
-    return {"ok":True}
+    try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
+    except Exception: pass
+    return {"ok":True,"spins_added":spins}
+
+@app.post("/api/admin/orders/{oid}/reject")
+async def reject_order(oid: str, authorization: str|None=Header(default=None)):
+    uid = require_admin(authorization)
+    with db() as c:
+        row = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        if not row: raise HTTPException(404,"Заявка не найдена")
+        if row["status"] != "pending": return {"ok":True,"status":row["status"]}
+        c.execute("UPDATE orders SET status='rejected' WHERE id=? AND status='pending'", (oid,))
+    audit(uid,"reject_order",oid)
+    try: await bot.send_message(row["telegram_id"], "❌ Оплата не подтверждена. Проверь чек/перевод и при необходимости отправь заявку повторно или свяжись с администратором.")
+    except Exception: pass
+    return {"ok":True,"status":"rejected"}
 
 @app.post("/api/admin/admins")
 async def add_admin(payload: dict, authorization: str|None=Header(default=None)):
@@ -337,7 +521,10 @@ def reply_menu():
         [KeyboardButton(text="🎁 Мои призы"), KeyboardButton(text="🎟 Купить вращения")]
     ], resize_keyboard=True, is_persistent=True)
 
-PACKS = {5:225, 10:400, 25:875}
+PACKS = {1:50, 3:120, 10:400}
+RUB_PER_STAR = 2
+CARD_PAYMENT_DETAILS = os.getenv("CARD_PAYMENT_DETAILS", "Укажи реквизиты карты в Render → Environment: CARD_PAYMENT_DETAILS")
+TON_WALLET_ADDRESS = os.getenv("TON_WALLET_ADDRESS", "Укажи адрес TON-кошелька в Render → Environment: TON_WALLET_ADDRESS")
 @dp.message(CommandStart())
 async def start(m: Message):
     await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.", reply_markup=reply_menu())
@@ -429,6 +616,9 @@ async def claim_prize(cb):
             await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video","видео"}:
             await bot.send_video(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
+        elif kind in {"video_note","кружок"}:
+            await bot.send_video_note(cb.from_user.id,value)
+            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"link","url","ссылка"}:
             await bot.send_message(cb.from_user.id,f"🎉 Твой приз: {row['prize_label']}\n{value}",disable_web_page_preview=False)
         else:
@@ -438,6 +628,74 @@ async def claim_prize(cb):
     except Exception:
         with db() as c: c.execute("UPDATE spins SET claimed=0 WHERE id=?",(spin_id,))
         await cb.answer("Не удалось отправить приз. Проверь, что в настройках приза указан правильный URL или file_id.",show_alert=True)
+
+@dp.message(F.video | F.document)
+async def admin_video_file_id(m: Message):
+    if not is_admin(m.from_user.id): return
+    if m.video:
+        file_id=m.video.file_id
+        kind="видео"
+        size=m.video.file_size or 0
+    elif m.document and (m.document.mime_type or "").startswith("video/"):
+        file_id=m.document.file_id
+        kind="видеофайл"
+        size=m.document.file_size or 0
+    else:
+        return
+    await m.answer(f"✅ {kind.capitalize()} принят. Сохрани этот Telegram file_id и вставь его в поле «Содержимое приза» с типом выдачи «Видео».\n\n<code>{file_id}</code>\n\nРазмер: {size/1024/1024:.1f} МБ\nБот будет отправлять сохранённый файл напрямую через Telegram, без загрузки на сервер.",parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("payok:"))
+async def bot_approve_payment(callback):
+    uid=callback.from_user.id
+    if uid not in admin_ids_all():
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    oid=callback.data.split(":",1)[1]
+    with db() as c:
+        row=c.execute("SELECT * FROM orders WHERE id=?",(oid,)).fetchone()
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True); return
+        if row["status"]!="pending":
+            await callback.answer(f"Уже обработана: {row['status']}", show_alert=True); return
+        try: info=json.loads(row["details"] or "{}")
+        except Exception: info={}
+        spins=int(info.get("spins",0))
+        if spins not in PACKS:
+            await callback.answer("Некорректный пакет", show_alert=True); return
+        c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'",(oid,))
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
+        c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
+    audit(uid,"approve_order_bot",oid)
+    try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
+    except Exception: pass
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.reply(f"✅ Заявка {oid} подтверждена администратором {uid}. Начислено {spins} вращений пользователю {row['telegram_id']}.")
+    except Exception: pass
+    await callback.answer("Оплата подтверждена, вращения начислены")
+
+@dp.callback_query(F.data.startswith("payno:"))
+async def bot_reject_payment(callback):
+    uid=callback.from_user.id
+    if uid not in admin_ids_all():
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    oid=callback.data.split(":",1)[1]
+    with db() as c:
+        row=c.execute("SELECT * FROM orders WHERE id=?",(oid,)).fetchone()
+        if not row:
+            await callback.answer("Заявка не найдена", show_alert=True); return
+        if row["status"]!="pending":
+            await callback.answer(f"Уже обработана: {row['status']}", show_alert=True); return
+        c.execute("UPDATE orders SET status='rejected' WHERE id=? AND status='pending'",(oid,))
+    audit(uid,"reject_order_bot",oid)
+    try: await bot.send_message(row["telegram_id"],"❌ Оплата отклонена администратором. Проверь чек и реквизиты; если считаешь это ошибкой, свяжись с администратором.")
+    except Exception: pass
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.reply(f"❌ Заявка {oid} отклонена администратором {uid}. Вращения не начислены.")
+    except Exception: pass
+    await callback.answer("Заявка отклонена")
 
 @dp.message(Command("paysupport"))
 async def paysupport(m: Message):
