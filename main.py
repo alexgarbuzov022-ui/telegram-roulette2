@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -51,7 +51,7 @@ def init_db():
           id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', image TEXT DEFAULT '',
           rarity TEXT NOT NULL DEFAULT 'Обычный', weight REAL NOT NULL DEFAULT 1,
           points INTEGER NOT NULL DEFAULT 0, prize_type TEXT NOT NULL DEFAULT 'points',
-          delivery_value TEXT DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+          delivery_value TEXT DEFAULT '', media_files TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS payments(
           charge_id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL, total_amount INTEGER NOT NULL,
@@ -76,6 +76,9 @@ def init_db():
             c.execute("ALTER TABLE spins ADD COLUMN delivery_value TEXT DEFAULT ''")
         if "claimed" not in spin_cols:
             c.execute("ALTER TABLE spins ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
+        prize_cols = {r["name"] for r in c.execute("PRAGMA table_info(prizes)").fetchall()}
+        if "media_files" not in prize_cols:
+            c.execute("ALTER TABLE prizes ADD COLUMN media_files TEXT NOT NULL DEFAULT '[]'")
         cur = c.execute("SELECT COUNT(*) n FROM prizes")
         if cur.fetchone()["n"] == 0:
             seeds = [
@@ -121,7 +124,9 @@ def require_admin(auth):
 def prize_dict(r):
     return {"id":r["id"],"name":r["name"],"description":r["description"],"image":r["image"],
             "rarity":r["rarity"],"weight":r["weight"],"points":r["points"],
-            "type":r["prize_type"],"delivery_value":r["delivery_value"],"enabled":bool(r["enabled"])}
+            "type":r["prize_type"],"delivery_value":r["delivery_value"],
+            "media_files":json.loads(r["media_files"] or "[]") if "media_files" in r.keys() else [],
+            "enabled":bool(r["enabled"])}
 
 @app.get("/")
 async def home(): return FileResponse(BASE / "web" / "index.html")
@@ -194,9 +199,13 @@ async def spin(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
+        delivery_payload = chosen["delivery_value"] or ""
+        media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
+        if media_files:
+            delivery_payload = json.dumps({"media_files": media_files}, ensure_ascii=False)
         c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],chosen["delivery_value"],0 if chosen["delivery_value"] else 1))
-    claimable = bool(str(chosen["delivery_value"] or "").strip())
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+    claimable = bool(str(delivery_payload or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"rarity":chosen["rarity"],"image":chosen["image"],
             "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
 
@@ -223,12 +232,16 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
     rarity = str(payload.get("rarity","Обычный"))[:40]
     points = max(0,min(100000000,int(payload.get("points",0))))
     with db() as c:
-        c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,enabled)
-        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
+        media_files = payload.get("media_files", [])
+        if not isinstance(media_files, list):
+            raise HTTPException(400, "Список медиафайлов задан неверно")
+        media_json = json.dumps([{"url":str(x.get("url",""))[:1000],"type":str(x.get("type",""))[:20]} for x in media_files if isinstance(x,dict) and x.get("url")], ensure_ascii=False)
+        c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files,enabled)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
         image=excluded.image,rarity=excluded.rarity,weight=excluded.weight,points=excluded.points,
-        prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,enabled=excluded.enabled""",
+        prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,enabled=excluded.enabled""",
         (pid,name,str(payload.get("description",""))[:2000],str(payload.get("image",""))[:1000],rarity,weight,points,
-         str(payload.get("type","points"))[:30],str(payload.get("delivery_value",""))[:2000],1 if payload.get("enabled",True) else 0))
+         str(payload.get("type","points"))[:30],str(payload.get("delivery_value",""))[:2000],media_json,1 if payload.get("enabled",True) else 0))
     audit(uid,"save_prize",f"{pid}: {name}; weight={weight}; rarity={rarity}")
     return {"ok":True,"id":pid}
 
@@ -254,7 +267,29 @@ async def upload_image(file: UploadFile=File(...), authorization: str|None=Heade
     name = uuid.uuid4().hex + ext
     folder = BASE/"uploads"; folder.mkdir(exist_ok=True); (folder/name).write_bytes(data)
     audit(uid,"upload_image",name)
-    return {"url":"/uploads/"+name}
+    return {"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name}
+
+@app.post("/api/admin/upload-media")
+async def upload_media(files: list[UploadFile]=File(...), authorization: str|None=Header(default=None)):
+    uid = require_admin(authorization)
+    if not files or len(files) > 20:
+        raise HTTPException(400, "Выбери от 1 до 20 фото или видео")
+    allowed = {"image/jpeg":".jpg", "image/png":".png", "image/webp":".webp", "image/gif":".gif",
+               "video/mp4":".mp4", "video/webm":".webm", "video/quicktime":".mov"}
+    folder = BASE/"uploads"; folder.mkdir(exist_ok=True)
+    results=[]
+    for file in files:
+        ext=allowed.get(file.content_type or "")
+        if not ext:
+            raise HTTPException(400, f"Не поддерживается файл {file.filename}. Используй JPG, PNG, WEBP, GIF, MP4, WEBM или MOV.")
+        data=await file.read()
+        if not data or len(data)>20*1024*1024:
+            raise HTTPException(413, "Каждый файл должен быть не больше 20 МБ")
+        name=uuid.uuid4().hex+ext
+        (folder/name).write_bytes(data)
+        results.append({"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
+    audit(uid,"upload_media",f"files={len(results)}")
+    return {"files":results}
 
 @app.post("/api/admin/orders/{oid}/approve")
 async def approve_order(oid: str, authorization: str|None=Header(default=None)):
@@ -372,7 +407,25 @@ async def claim_prize(cb):
         if c.execute("SELECT changes() n").fetchone()["n"] != 1:
             await cb.answer("Этот приз уже получен",show_alert=True); return
     try:
-        if kind in {"photo","image","картинка","фото"}:
+        media_payload = None
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict) and isinstance(parsed.get("media_files"), list):
+                media_payload = parsed["media_files"]
+        except (ValueError, TypeError):
+            pass
+        if media_payload:
+            photos = [x["url"] for x in media_payload if x.get("type") == "photo" and x.get("url")]
+            videos = [x["url"] for x in media_payload if x.get("type") == "video" and x.get("url")]
+            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
+            # Telegram media groups accept up to 10 items; send larger collections in batches.
+            for start in range(0, len(photos), 10):
+                batch = photos[start:start+10]
+                media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i,url in enumerate(batch)]
+                await bot.send_media_group(cb.from_user.id, media)
+            for url in videos:
+                await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
+        elif kind in {"photo","image","картинка","фото"}:
             await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video","видео"}:
             await bot.send_video(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
