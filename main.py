@@ -81,6 +81,15 @@ def init_db():
         prize_cols = {r["name"] for r in c.execute("PRAGMA table_info(prizes)").fetchall()}
         if "media_files" not in prize_cols:
             c.execute("ALTER TABLE prizes ADD COLUMN media_files TEXT NOT NULL DEFAULT '[]'")
+        if "media_pool" not in prize_cols:
+            c.execute("ALTER TABLE prizes ADD COLUMN media_pool TEXT NOT NULL DEFAULT ''")
+        c.execute("""CREATE TABLE IF NOT EXISTS media_library(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            url TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         # Add/update only the built-in starter prizes. Existing user-created prizes and
         # uploaded media are preserved; this migration is safe to run on every startup.
         starter_prizes = [
@@ -199,6 +208,7 @@ def prize_dict(r):
             "rarity":r["rarity"],"weight":r["weight"],"points":r["points"],
             "type":r["prize_type"],"delivery_value":r["delivery_value"],
             "media_files":json.loads(r["media_files"] or "[]") if "media_files" in r.keys() else [],
+            "media_pool":r["media_pool"] if "media_pool" in r.keys() else "",
             "enabled":bool(r["enabled"])}
 
 @app.get("/")
@@ -316,6 +326,13 @@ async def spin(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         delivery_payload = chosen["delivery_value"] or ""
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
+        media_pool = str(chosen["media_pool"] or "") if "media_pool" in chosen.keys() else ""
+        if media_pool:
+            with db() as pool_db:
+                pool_rows = pool_db.execute("SELECT url,media_type FROM media_library WHERE category=?",(media_pool,)).fetchall()
+            if pool_rows:
+                picked = secrets.choice(pool_rows)
+                media_files = [{"url": picked["url"], "type": picked["media_type"]}]
         # Keep the complete prize pack (e.g. all 3 photos) for this win.
         # Randomize order on every win so media is not always delivered sequentially.
         valid_media = []
@@ -455,12 +472,15 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
         if not isinstance(media_files, list):
             raise HTTPException(400, "Список медиафайлов задан неверно")
         media_json = json.dumps([{"url":str(x.get("url",""))[:1000],"type":str(x.get("type",""))[:20]} for x in media_files if isinstance(x,dict) and x.get("url")], ensure_ascii=False)
-        c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files,enabled)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
+        media_pool = str(payload.get("media_pool",""))[:30]
+    if media_pool not in {"","photo","video_noface","video_face"}:
+        raise HTTPException(400,"Неизвестная категория медиа")
+    c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files,enabled,media_pool)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
         image=excluded.image,rarity=excluded.rarity,weight=excluded.weight,points=excluded.points,
-        prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,enabled=excluded.enabled""",
+        prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,enabled=excluded.enabled,media_pool=excluded.media_pool""",
         (pid,name,str(payload.get("description",""))[:2000],str(payload.get("image",""))[:1000],rarity,weight,points,
-         str(payload.get("type","points"))[:30],str(payload.get("delivery_value",""))[:2000],media_json,1 if payload.get("enabled",True) else 0))
+         str(payload.get("type","points"))[:30],str(payload.get("delivery_value",""))[:2000],media_json,1 if payload.get("enabled",True) else 0,media_pool))
     audit(uid,"save_prize",f"{pid}: {name}; weight={weight}; rarity={rarity}")
     return {"ok":True,"id":pid}
 
@@ -525,6 +545,42 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
         results.append({"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
     audit(uid,"upload_media",f"files={len(results)}")
     return {"files":results}
+
+
+@app.get("/api/admin/media-pool")
+async def list_media_pool(authorization: str|None=Header(default=None)):
+    require_admin(authorization)
+    with db() as c:
+        rows=c.execute("SELECT id,category,url,media_type,created_at FROM media_library ORDER BY id DESC").fetchall()
+    return {"files":[dict(r) for r in rows]}
+
+@app.post("/api/admin/media-pool/upload")
+async def upload_media_pool(category: str, files: list[UploadFile]=File(...), authorization: str|None=Header(default=None)):
+    uid=require_admin(authorization)
+    if category not in {"photo","video_noface","video_face"}:
+        raise HTTPException(400,"Выбери категорию загрузки")
+    if not files or len(files)>50:
+        raise HTTPException(400,"Выбери от 1 до 50 файлов")
+    allowed={"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif",
+             "video/mp4":".mp4","video/webm":".webm","video/quicktime":".mov"}
+    folder=BASE/"uploads"; folder.mkdir(exist_ok=True); saved=[]
+    for file in files:
+        ct=file.content_type or ""; ext=allowed.get(ct)
+        if not ext: raise HTTPException(400,f"Формат файла {file.filename} не поддерживается")
+        if category=="photo" and not ct.startswith("image/"):
+            raise HTTPException(400,"В раздел «Фото» загружай только изображения")
+        if category!="photo" and not ct.startswith("video/"):
+            raise HTTPException(400,"В разделы видео загружай только видео")
+        data=await file.read()
+        if not data or len(data)>20*1024*1024: raise HTTPException(413,"Каждый файл должен быть не больше 20 МБ")
+        name=uuid.uuid4().hex+ext; (folder/name).write_bytes(data)
+        url=WEBAPP_URL.rstrip("/")+"/uploads/"+name
+        mt="photo" if ct.startswith("image/") else "video"
+        with db() as c:
+            cur=c.execute("INSERT INTO media_library(category,url,media_type) VALUES(?,?,?)",(category,url,mt))
+            saved.append({"id":cur.lastrowid,"category":category,"url":url,"media_type":mt})
+    audit(uid,"upload_media_pool",f"{category}: {len(saved)} files")
+    return {"files":saved,"count":len(saved)}
 
 @app.post("/api/admin/orders/{oid}/approve")
 async def approve_order(oid: str, authorization: str|None=Header(default=None)):
