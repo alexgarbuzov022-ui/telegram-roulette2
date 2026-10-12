@@ -36,6 +36,27 @@ input,textarea,select{width:100%;padding:10px;border-radius:9px;border:1px solid
 .roulette.rarity-legendary:after,.roulette.rarity-mythic:after{content:'';position:absolute;inset:0;z-index:5;pointer-events:none;background:radial-gradient(circle, #fff9 0, transparent 68%);animation:rarityFlash .65s ease-out}
 @media(prefers-reduced-motion:reduce){.roulette.rarity-common,.roulette.rarity-rare,.roulette.rarity-epic,.roulette.rarity-legendary,.roulette.rarity-mythic,.rarity-burst i{animation-duration:.01ms!important;animation-iteration-count:1!important}}
 
+
+/* Админка: всё раскрыто и сразу видно */
+#adminView{max-width:100%;}
+#adminView>.panel{padding:16px;border-color:#6b3290;background:linear-gradient(180deg,#17121f,#100e15)}
+#adminView h3{font-size:23px;margin:4px 0 8px}
+#adminView h4{font-size:16px;margin:8px 0 12px;color:#f0d7ff}
+#adminView .admin-intro{padding:12px;border:1px solid #56306e;border-radius:12px;background:#21142b;margin:12px 0}
+#adminView .library-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}
+#adminView .library-card{margin:0;padding:12px;border:1px solid #513069;background:#17121f;min-width:0}
+#adminView .library-card b{display:block;font-size:15px;margin-bottom:4px}
+#adminView .library-card input[type=file]{font-size:12px;padding:8px;background:#0c0b10}
+#adminView .library-card button{min-height:42px}
+#poolCounts{padding:10px;border-radius:10px;background:#21142b;color:#f0d7ff;margin:8px 0;font-weight:700}
+#poolStatus,#adminMsg{padding:10px;border-radius:10px;background:#19151f;margin:8px 0;min-height:18px;overflow-wrap:anywhere}
+#adminView .admin-block{border:1px solid #393040;border-radius:14px;padding:14px;margin:14px 0;background:#121016}
+#adminView .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}
+#adminView .form-grid .wide{grid-column:1/-1}
+#adminView label{display:block;margin-top:6px;font-weight:650}
+#adminView .primary{position:sticky;bottom:78px;z-index:5;box-shadow:0 4px 20px #0009}
+#adminView .history-item{flex-wrap:wrap}
+@media(max-width:560px){body{padding-left:9px;padding-right:9px}#adminView>.panel{padding:10px}#adminView .library-grid{grid-template-columns:1fr;gap:8px}#adminView .library-card{display:grid;grid-template-columns:1fr;gap:3px}#adminView .form-grid{grid-template-columns:1fr}#adminView .form-grid .wide{grid-column:auto}#adminView .primary{bottom:76px}}
 </style></head><body><main>
 <header><div class="tag">XDarryanaX</div><h1>💜 Призовая рулетка</h1><p class="muted">Выигрывай почти задаром! 🔥</p><p class="muted">📸 Фото • 🎥 Видео • 💎 Скидки • 🔒 Приват • ✨ Эксклюзив</p><p class="muted">Крути рулетку и забирай свои призы!</p></header>
 <div class="stats"><div class="stat">Вращения<span class="num" id="spins">—</span></div></div>
@@ -48,25 +69,21 @@ input,textarea,select{width:100%;padding:10px;border-radius:9px;border:1px solid
 <div class="section-title">Каталог призов</div><div class="grid" id="catalog"></div>
 </section>
 <section id="profileView" class="hidden"><div class="panel"><div class="profile-head"><img id="avatar" class="avatar hidden" alt="Аватар Telegram"><div><h3>👤 Твой профиль</h3><p id="profileName" class="muted"></p></div></div><p>Telegram ID: <b id="uid">—</b></p><p>Вращения: <b id="profileSpins">—</b></p><p>Приглашённые друзья с покупкой: <b id="refs">—</b></p><button class="secondary" id="share">Пригласить друга</button></div><div class="panel"><b>История выигрышей</b><div id="history"></div></div><div class="panel"><b>История оплат</b><div id="payments" class="muted"></div></div></section>
-<section id="adminView" class="hidden"><div class="panel"><h3>⚙️ Админ-панель</h3><p class="muted">Добавляй призы, изображения, редкость и шанс. Вероятность рассчитывается по весам и нормализуется до 100%.</p>
-<div class="panel"><h4>📚 Библиотека контента</h4>
-<p>Загружай файлы в нужный раздел. При создании приза категория подставится автоматически по названию — ничего вручную выбирать не нужно.</p>
-<div class="panel"><b>📸 Фото</b><p class="muted">Сюда загружай все фотографии моделей.</p><input id="poolPhotoFiles" type="file" accept="image/*" multiple><button class="secondary" id="uploadPoolPhoto">Загрузить фото</button></div>
-<div class="panel"><b>🎥 Видео без лица</b><p class="muted">Сюда загружай ролики без лица.</p><input id="poolNoFaceFiles" type="file" accept="video/mp4,video/webm,video/quicktime" multiple><button class="secondary" id="uploadPoolNoFace">Загрузить видео без лица</button></div>
-<div class="panel"><b>🎬 Видео с лицом</b><p class="muted">Сюда загружай ролики с лицом.</p><input id="poolFaceFiles" type="file" accept="video/mp4,video/webm,video/quicktime" multiple><button class="secondary" id="uploadPoolFace">Загрузить видео с лицом</button></div>
-<div id="poolStatus" class="muted"></div><div id="poolCounts" class="muted"></div>
-<p class="muted">Можно выбрать несколько файлов за раз. Максимум 100 файлов за одну загрузку, до 20 МБ на файл.</p>
-</div>
-<input id="pid" type="hidden"><label>Название</label><input id="pname" placeholder="Например, Telegram Premium">
-<label>Описание</label><textarea id="pdesc" placeholder="Что получает победитель"></textarea>
-<label>Ссылка на картинку (необязательно)</label><input id="pimage" placeholder="https://...">
-<label>Или загрузить картинку для карточки приза</label><input id="pfile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
-<small class="muted">Фото и видео для выдачи бери из трёх разделов библиотеки выше. Не прикрепляй файлы здесь — категория подберётся по названию приза. Для текстового кода или ссылки используй поле ниже.</small><div id="mediaStatus" class="muted"></div>
-<label>Редкость</label><select id="prarity"><option>Обычный</option><option>Редкий</option><option>Эпический</option><option>Легендарный</option><option>Мифический</option></select>
-<label>Вес / шанс относительно других призов</label><input id="pweight" type="number" min="0.001" step="0.1" value="10">
+<section id="adminView" class="hidden"><div class="panel"><h3>⚙️ Админ-панель</h3><p class="muted">Все разделы открыты постоянно — ничего не нужно сворачивать или раскрывать. На телефоне блоки идут друг за другом.</p>
+<div class="admin-intro"><b>📚 1. Библиотека контента</b><p class="muted">Загрузи файлы в один из трёх разделов. Название приза само определит, откуда брать медиа.</p><div id="poolCounts">Считаю загруженные файлы…</div></div>
+<div class="library-grid">
+<div class="panel library-card"><b>📸 Фото</b><p class="muted">Фотографии моделей</p><input id="poolPhotoFiles" type="file" accept="image/*" multiple><button class="secondary" id="uploadPoolPhoto">⬆️ Загрузить фото</button></div>
+<div class="panel library-card"><b>🎥 Видео без лица</b><p class="muted">Видео без лица в кадре</p><input id="poolNoFaceFiles" type="file" accept="video/mp4,video/webm,video/quicktime" multiple><button class="secondary" id="uploadPoolNoFace">⬆️ Загрузить видео</button></div>
+<div class="panel library-card"><b>🎬 Видео с лицом</b><p class="muted">Видео с лицом в кадре</p><input id="poolFaceFiles" type="file" accept="video/mp4,video/webm,video/quicktime" multiple><button class="secondary" id="uploadPoolFace">⬆️ Загрузить видео</button></div>
+</div><div id="poolStatus" class="muted"></div><p class="muted">Можно выбрать сразу несколько файлов. Максимум 100 файлов за загрузку, до 20 МБ на файл.</p>
+<div class="admin-block"><h4>🎁 2. Создать приз</h4><p class="muted">Сначала введи название — ниже сразу покажется выбранная категория выдачи.</p>
+<div class="form-grid"><div class="wide"><input id="pid" type="hidden"><label>Название приза</label><input id="pname" placeholder="Например, Фото модели"></div>
+<div><label>Описание</label><textarea id="pdesc" placeholder="Что получает победитель"></textarea></div><div><label>Картинка карточки (URL)</label><input id="pimage" placeholder="https://..."></div><div><label>Или загрузить картинку карточки</label><input id="pfile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></div><div class="wide"><small class="muted">Не прикрепляй сюда медиа для выдачи: используй три библиотеки выше.</small><div id="mediaStatus" class="muted"></div></div>
+<div><label>Редкость</label><select id="prarity"><option>Обычный</option><option>Редкий</option><option>Эпический</option><option>Легендарный</option><option>Мифический</option></select>
+<div><label>Вес / шанс относительно других призов</label><input id="pweight" type="number" min="0.001" step="0.1" value="10"></div>
 <label style="display:none">Служебное поле</label><input id="ppoints" type="hidden" value="0">
-<label>Тип выдачи приза</label><select id="ptype"><option value="points">Без дополнительной выдачи</option><option value="text">Текст или код</option><option value="link">Ссылка</option><option value="photo">Фото (URL или Telegram file_id)</option><option value="video">Видео (URL или Telegram file_id)</option><option value="media_group">Набор фото и видео из загрузок</option></select><label>Категория выдачи (определяется по названию)</label><input id="mediaPool" value="" readonly placeholder="Сначала введи название приза"><small id="mediaPoolHint" class="muted">«Фото модели» → 📸 Фото · «Видео без лица» → 🎥 Видео без лица · «Видео с лицом» → 🎬 Видео с лицом.</small><label>Содержимое приза: текст, ссылка, URL фото/видео или Telegram file_id</label><input id="pdelivery" placeholder="Вставь содержимое для выдачи">
-<button class="primary" id="savePrize">Добавить приз</button><button class="secondary" id="cancelEdit">Отменить редактирование / очистить форму</button><hr><h4>Реквизиты ручной оплаты</h4><label>Номер карты / реквизиты СБП</label><textarea id="adminCardDetails" placeholder="Вставь номер карты, банк и имя получателя"></textarea><label>Адрес TON-кошелька</label><input id="adminTonWallet" placeholder="TON wallet address"><label>Курс для ручной оплаты: рублей за 1 ⭐</label><input id="adminRubRate" type="number" min="1" value="2"><button class="secondary" id="savePaymentSettings">Сохранить реквизиты</button><p class="muted">Новые реквизиты сразу показываются покупателям. Старые заявки сохраняют сумму, рассчитанную в момент создания.</p><hr><h4>Заявки на оплату</h4><div id="adminOrders"></div><hr><h4>Существующие призы</h4><button class="secondary" id="undoDelete">↩️ Восстановить последний удалённый приз</button><div id="adminPrizes"></div><hr><h4>Добавить администратора</h4><label>Telegram ID</label><input id="newAdmin" type="number"><button class="secondary" id="addAdmin">Добавить админа</button><hr><h4>Рассылка</h4><textarea id="broadcastText" placeholder="Сообщение всем пользователям"></textarea><button class="secondary" id="broadcast">Отправить рассылку</button><p class="muted" id="adminMsg"></p></div></section>
+<div><label>Тип выдачи приза</label><select id="ptype"><option value="points">Без дополнительной выдачи</option><option value="text">Текст или код</option><option value="link">Ссылка</option><option value="photo">Фото (URL или Telegram file_id)</option><option value="video">Видео (URL или Telegram file_id)</option><option value="media_group">Набор фото и видео из загрузок</option></select></div><div class="wide"><label>Категория медиа (подбирается автоматически)</label><input id="mediaPool" value="" readonly placeholder="Сначала введи название приза"><small id="mediaPoolHint" class="muted">«Фото модели» → 📸 Фото · «Видео без лица» → 🎥 Видео без лица · «Видео с лицом» → 🎬 Видео с лицом.</small><label>Содержимое для текста, кода или ссылки (если нужно)</label><input id="pdelivery" placeholder="Код или ссылка для победителя"></div></div>
+<button class="primary" id="savePrize">💾 Сохранить приз</button><button class="secondary" id="cancelEdit">Очистить форму / отменить редактирование</button></div><div class="admin-block"><h4>💳 3. Реквизиты оплаты</h4><label>Номер карты / реквизиты СБП</label><textarea id="adminCardDetails" placeholder="Вставь номер карты, банк и имя получателя"></textarea><label>Адрес TON-кошелька</label><input id="adminTonWallet" placeholder="TON wallet address"><label>Курс для ручной оплаты: рублей за 1 ⭐</label><input id="adminRubRate" type="number" min="1" value="2"><button class="secondary" id="savePaymentSettings">Сохранить реквизиты</button><p class="muted">Новые реквизиты сразу показываются покупателям. Старые заявки сохраняют сумму, рассчитанную в момент создания.</p></div><div class="admin-block"><h4>🧾 4. Заявки на оплату</h4><div id="adminOrders"></div></div><div class="admin-block"><h4>🎁 5. Существующие призы</h4><button class="secondary" id="undoDelete">↩️ Восстановить последний удалённый приз</button><div id="adminPrizes"></div></div><div class="admin-block"><h4>👥 6. Добавить администратора</h4><label>Telegram ID</label><input id="newAdmin" type="number"><button class="secondary" id="addAdmin">Добавить админа</button></div><div class="admin-block"><h4>📣 7. Рассылка</h4><textarea id="broadcastText" placeholder="Сообщение всем пользователям"></textarea><button class="secondary" id="broadcast">Отправить рассылку</button><p class="muted" id="adminMsg"></p></div></div></section>
 <p class="muted" style="text-align:center">Результат определяет сервер. Выигрыш отображается в истории профиля.</p>
 <nav class="bottom-nav"><button class="tab" data-tab="payment">💳<br>Оплата</button><button class="tab active" data-tab="roulette">🎰<br>Рулетка</button><button class="tab" data-tab="profile">👤<br>Профиль</button><button class="tab hidden" id="adminTab" data-tab="admin">⚙️<br>Админка</button></nav>
 </main><script>
@@ -110,8 +127,10 @@ document.querySelector('#spin').onclick=async()=>{
   document.querySelector('#result').innerHTML='<div>🎉 Выпало: <b>'+esc(out.prize)+'</b> — '+esc(out.rarity)+'</div>'+(out.claimable?'<div class="muted" style="margin:6px 0">Приз можно забрать в боте: «🎁 Мои призы».</div>':'')+'<button class="primary" id="ackPrize" type="button">🎁 Получить приз</button>';
   document.querySelector('#ackPrize').onclick=async()=>{
    document.querySelector('#ackPrize').disabled=true;
-   if(out.claimable) document.querySelector('#result').innerHTML='<div>🎁 Приз сохранён! Чтобы получить фото или видео, открой чат с ботом и нажми «🎁 Мои призы».</div>';
+   if(out.claimable) document.querySelector('#result').innerHTML='<div>🎁 Приз сохранён! Открой чат с ботом и нажми «🎁 Мои призы», чтобы получить медиа.</div>';
    else document.querySelector('#result').textContent='Готово! Можно крутить снова.';
+   b.textContent='🎰 КРУТИТЬ';
+   b.disabled=false;
    document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
    cardEl.classList.remove('winner','win-reveal');
    track.style.transition='none';track.style.transform='translateX(0)';
