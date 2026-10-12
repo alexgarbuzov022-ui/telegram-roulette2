@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -68,6 +68,14 @@ def init_db():
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS admins(telegram_id INTEGER PRIMARY KEY, added_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
+        # Migrate existing installations without deleting user data.
+        spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
+        if "prize_type" not in spin_cols:
+            c.execute("ALTER TABLE spins ADD COLUMN prize_type TEXT NOT NULL DEFAULT 'points'")
+        if "delivery_value" not in spin_cols:
+            c.execute("ALTER TABLE spins ADD COLUMN delivery_value TEXT DEFAULT ''")
+        if "claimed" not in spin_cols:
+            c.execute("ALTER TABLE spins ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
         cur = c.execute("SELECT COUNT(*) n FROM prizes")
         if cur.fetchone()["n"] == 0:
             seeds = [
@@ -145,14 +153,35 @@ async def prizes():
     total = sum(max(0,float(r["weight"])) for r in rows) or 1
     return {"prizes":[{**prize_dict(r),"chance":round(max(0,float(r["weight"]))/total*100,3)} for r in rows]}
 
+@app.post("/api/create-invoice")
+async def create_invoice(payload: dict, authorization: str|None=Header(default=None)):
+    uid = uid_from_header(authorization)
+    try:
+        n = int(payload.get("spins", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Неверный набор")
+    if n not in PACKS:
+        raise HTTPException(400, "Такого набора нет")
+    link = await bot.create_invoice_link(
+        title=f"{n} вращений рулетки",
+        description=f"Пакет из {n} вращений виртуальной рулетки",
+        payload=f"spinpack:{uid}:{n}",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{n} вращений", amount=PACKS[n])],
+        provider_token=""
+    )
+    return {"url": link}
+
 @app.post("/api/spin")
 async def spin(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
+    admin_free = is_admin(uid)
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()
-        if not u or u["spins"] < 1: raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
+        if not admin_free and (not u or u["spins"] < 1):
+            raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
         rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
         if not rows: raise HTTPException(500, "Нет активных призов")
         total = sum(float(r["weight"]) for r in rows)
@@ -161,11 +190,15 @@ async def spin(authorization: str|None=Header(default=None)):
         for r in rows:
             acc += float(r["weight"])
             if n < acc: chosen = r; break
-        c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
-        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded) VALUES(?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"]))
+        if admin_free:
+            c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
+        else:
+            c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
+        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],chosen["delivery_value"],0 if chosen["delivery_value"] else 1))
+    claimable = bool(str(chosen["delivery_value"] or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"rarity":chosen["rarity"],"image":chosen["image"],
-            "points_awarded":chosen["points"],"description":chosen["description"]}
+            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
 
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
@@ -202,8 +235,12 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
 @app.delete("/api/admin/prizes/{pid}")
 async def delete_prize(pid: str, authorization: str|None=Header(default=None)):
     uid = require_admin(authorization)
-    with db() as c: c.execute("UPDATE prizes SET enabled=0 WHERE id=?", (pid,))
-    audit(uid,"disable_prize",pid)
+    with db() as c:
+        row = c.execute("SELECT name FROM prizes WHERE id=?", (pid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Приз не найден")
+        c.execute("DELETE FROM prizes WHERE id=?", (pid,))
+    audit(uid,"delete_prize",f"{pid}: {row['name']}")
     return {"ok":True}
 
 @app.post("/api/admin/upload")
@@ -255,40 +292,103 @@ async def broadcast(payload: dict, authorization: str|None=Header(default=None))
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎟 Купить вращения",callback_data="shop")],
-        [InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))]
+        [InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))],
+        [InlineKeyboardButton(text="🎁 Мои призы",callback_data="myprizes")]
     ])
 
-PACKS = {5:225, 10:400, 25:875} # bundle prices in Stars; adjust from admin later
+def reply_menu():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🎁 Мои призы"), KeyboardButton(text="🎟 Купить вращения")]
+    ], resize_keyboard=True, is_persistent=True)
+
+PACKS = {5:225, 10:400, 25:875}
 @dp.message(CommandStart())
 async def start(m: Message):
-    await m.answer("🎰 Добро пожаловать! Вращение — 50 ⭐. Выбирай набор вращений:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="5 вращений — 225 ⭐",callback_data="pack:5")],
-        [InlineKeyboardButton(text="10 вращений — 400 ⭐",callback_data="pack:10")],
-        [InlineKeyboardButton(text="25 вращений — 875 ⭐",callback_data="pack:25")],
-        [InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))]
+    await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.", reply_markup=reply_menu())
+    await m.answer("Нажми, чтобы открыть рулетку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]
     ]))
+
+@dp.message(F.text == "🎰 Рулетка")
+async def menu_roulette(m: Message):
+    await m.answer("Открывай рулетку кнопкой ниже:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))]]))
+
+@dp.message(F.text == "👤 Профиль")
+async def menu_profile(m: Message):
+    with db() as c:
+        u=c.execute("SELECT spins,points FROM users WHERE telegram_id=?",(m.from_user.id,)).fetchone()
+        wins=c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=?",(m.from_user.id,)).fetchone()["n"]
+        pending=c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=? AND claimed=0",(m.from_user.id,)).fetchone()["n"]
+    if not u:
+        await m.answer("Профиль пока пуст. Нажми /start.",reply_markup=reply_menu()); return
+    await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nБаллы: {u['points']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
+
+@dp.message(F.text == "🎟 Купить вращения")
+async def menu_buy(m: Message):
+    await m.answer("Покупка вращений находится внутри приложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]]))
+
+@dp.message(F.text == "🎁 Мои призы")
+async def menu_prizes(m: Message):
+    await send_my_prizes(m.chat.id, m.from_user.id)
+
+@dp.callback_query(F.data == "myprizes")
+async def my_prizes_callback(cb):
+    await send_my_prizes(cb.from_user.id, cb.from_user.id)
+    await cb.answer()
+
+async def send_my_prizes(chat_id: int, uid: int):
+    with db() as c:
+        rows=c.execute("SELECT id,prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? AND claimed=0 ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
+    if not rows:
+        await bot.send_message(chat_id,"🎁 Пока нет призов, которые можно получить. Когда выиграешь приз с выдачей, он появится здесь.",reply_markup=reply_menu())
+        return
+    await bot.send_message(chat_id,"🎁 Твои призы к получению. Нажми кнопку под нужным призом:",reply_markup=reply_menu())
+    for r in rows:
+        text=f"🎁 {r['prize_label']}\nРедкость: {r['rarity']}\nВыигран: {r['created_at']}"
+        if r['image']:
+            try: await bot.send_photo(chat_id,r['image'],caption=text)
+            except Exception: await bot.send_message(chat_id,text)
+        else:
+            await bot.send_message(chat_id,text)
+        await bot.send_message(chat_id,"Нажми, чтобы получить приз:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🎁 Получить: {r['prize_label'][:35]}",callback_data=f"claim:{r['id']}")]]))
+
+@dp.callback_query(F.data.startswith("claim:"))
+async def claim_prize(cb):
+    try: spin_id=int(cb.data.split(":",1)[1])
+    except Exception:
+        await cb.answer("Неверный приз",show_alert=True); return
+    with db() as c:
+        row=c.execute("SELECT * FROM spins WHERE id=? AND telegram_id=?",(spin_id,cb.from_user.id)).fetchone()
+        if not row:
+            await cb.answer("Приз не найден",show_alert=True); return
+        if row["claimed"]:
+            await cb.answer("Этот приз уже получен",show_alert=True); return
+        value=(row["delivery_value"] or "").strip()
+        kind=(row["prize_type"] or "text").lower()
+        if not value:
+            await cb.answer("Для этого приза администратор ещё не настроил выдачу",show_alert=True); return
+        c.execute("UPDATE spins SET claimed=1 WHERE id=? AND claimed=0",(spin_id,))
+        if c.execute("SELECT changes() n").fetchone()["n"] != 1:
+            await cb.answer("Этот приз уже получен",show_alert=True); return
+    try:
+        if kind in {"photo","image","картинка","фото"}:
+            await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
+        elif kind in {"video","видео"}:
+            await bot.send_video(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
+        elif kind in {"link","url","ссылка"}:
+            await bot.send_message(cb.from_user.id,f"🎉 Твой приз: {row['prize_label']}\n{value}",disable_web_page_preview=False)
+        else:
+            await bot.send_message(cb.from_user.id,f"🎉 Твой приз: {row['prize_label']}\n\n{value}")
+        await bot.send_message(cb.from_user.id,"Приз отправлен! 🎉",reply_markup=reply_menu())
+        await cb.answer("Приз получен!")
+    except Exception:
+        with db() as c: c.execute("UPDATE spins SET claimed=0 WHERE id=?",(spin_id,))
+        await cb.answer("Не удалось отправить приз. Проверь, что в настройках приза указан правильный URL или file_id.",show_alert=True)
+
 @dp.message(Command("paysupport"))
 async def paysupport(m: Message):
     await m.answer("По вопросам оплаты напиши владельцу бота и укажи дату и сумму платежа.")
-
-@dp.callback_query(F.data=="shop")
-async def shop(cb):
-    await cb.message.answer("Выбери набор:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="5 вращений — 225 ⭐",callback_data="pack:5")],
-        [InlineKeyboardButton(text="10 вращений — 400 ⭐",callback_data="pack:10")],
-        [InlineKeyboardButton(text="25 вращений — 875 ⭐",callback_data="pack:25")]
-    ]))
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("pack:"))
-async def buy_pack(cb):
-    n=int(cb.data.split(":")[1])
-    if n not in PACKS: await cb.answer("Неверный набор",show_alert=True); return
-    await bot.send_invoice(chat_id=cb.from_user.id,title=f"{n} вращений рулетки",
-      description=f"Пакет из {n} вращений виртуальной рулетки",
-      payload=f"spinpack:{cb.from_user.id}:{n}",currency="XTR",
-      prices=[LabeledPrice(label=f"{n} вращений",amount=PACKS[n])],provider_token="")
-    await cb.answer()
 
 @dp.pre_checkout_query()
 async def checkout(q: PreCheckoutQuery):
@@ -305,7 +405,7 @@ async def paid(m: Message):
         if cur.rowcount:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(uid,))
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(n,uid))
-    await m.answer(f"✅ Оплата подтверждена. Начислено {n} вращений!",reply_markup=keyboard())
+    # Оплата обработана; баланс обновится в Mini App без отдельного сообщения в чате.
 
 async def main():
     init_db()
