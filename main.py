@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import re
 import uvicorn
 
 BASE = Path(__file__).resolve().parent
@@ -328,23 +329,10 @@ async def spin(authorization: str|None=Header(default=None)):
         # A category is inferred on the server too, so prize delivery does not depend
         # on the admin page having sent the hidden category field correctly.
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
-        media_pool = str(chosen["media_pool"] or "") if "media_pool" in chosen.keys() else ""
-        if not media_pool:
-            prize_name = str(chosen["name"] or "").lower().replace("ё", "е")
-            if any(k in prize_name for k in ("видео с лицом", "видео с_лицом", "video face", "face video")):
-                media_pool = "video_face"
-            elif any(k in prize_name for k in ("видео без лица", "видео без_лица", "video noface", "faceless")):
-                media_pool = "video_noface"
-            elif any(k in prize_name for k in ("фото", "фотограф", "photo", "picture", "картинка")):
-                media_pool = "photo"
-        if media_pool:
-            with db() as pool_db:
-                pool_rows = pool_db.execute("SELECT url,media_type FROM media_library WHERE category=?",(media_pool,)).fetchall()
-            if pool_rows:
-                picked = secrets.choice(pool_rows)
-                media_files = [{"url": picked["url"], "type": picked["media_type"]}]
-        # Keep the complete prize pack (e.g. all 3 photos) for this win.
-        # Randomize order on every win so media is not always delivered sequentially.
+        # Each prize owns its own media. Infer pack size from the prize name.
+        prize_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
+        match_count = re.search(r"(?:набор\\s+из\\s+)?(10|3|1)\\s*(?:фото|фотограф|видео|шт)", prize_name_norm)
+        wanted_count = int(match_count.group(1)) if match_count else 1
         valid_media = []
         for item in media_files:
             if not isinstance(item, dict) or not str(item.get("url", "")).strip():
@@ -355,14 +343,16 @@ async def spin(authorization: str|None=Header(default=None)):
             if media_type in {"photo", "video"}:
                 valid_media.append({"url": str(item["url"]).strip(), "type": media_type})
         if valid_media:
-            secrets.SystemRandom().shuffle(valid_media)
+            # Prefer matching media kind based on prize name and select without replacement.
+            wants_video = "видео" in prize_name_norm or "video" in prize_name_norm
+            matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
+            if matching:
+                valid_media = matching
+            wanted_count = min(wanted_count, len(valid_media))
+            valid_media = secrets.SystemRandom().sample(valid_media, wanted_count)
             delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
         elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
-            # If the prize library is empty, fall back to the prize image instead
-            # of sending the literal text "[]" to the winner.
-            delivery_payload = json.dumps({
-                "media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]
-            }, ensure_ascii=False)
+            delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
             delivery_payload = ""
         c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -805,8 +795,11 @@ async def claim_prize(cb):
             # Telegram media groups accept up to 10 items; send larger collections in batches.
             for start in range(0, len(photos), 10):
                 batch = photos[start:start+10]
-                media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i,url in enumerate(batch)]
-                await bot.send_media_group(cb.from_user.id, media)
+                if len(batch) == 1:
+                    await bot.send_photo(cb.from_user.id, batch[0], caption=f"📸 {row['prize_label']}")
+                else:
+                    media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i,url in enumerate(batch)]
+                    await bot.send_media_group(cb.from_user.id, media)
             for url in videos:
                 await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
         elif kind in {"photo","image","картинка","фото"}:
