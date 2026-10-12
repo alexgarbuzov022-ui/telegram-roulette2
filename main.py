@@ -291,7 +291,7 @@ async def spin(authorization: str|None=Header(default=None)):
         # username is supplied by Telegram WebApp initData, stored from the validated user payload when possible.
         for admin_id in admin_ids_all():
             try:
-                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\nПользователь: {uid}\nПриз: {chosen['name']}\nРедкость: {chosen['rarity']}\nБаллы: {chosen['points']}\nID приза: {chosen['id']}")
+                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\nПользователь: {uid}\nПриз: {chosen['name']}\nРедкость: {chosen['rarity']}\nID приза: {chosen['id']}")
             except Exception: pass
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
@@ -540,8 +540,7 @@ def keyboard():
 
 def reply_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🎁 Мои призы"), KeyboardButton(text="🎟 Купить вращения")]
+        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")]
     ], resize_keyboard=True, is_persistent=True)
 
 PACKS = {1:50, 3:120, 10:400}
@@ -574,6 +573,10 @@ async def start(m: Message):
         [InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]
     ]))
 
+@dp.message(F.text == "💳 Оплата")
+async def menu_payment(m: Message):
+    await m.answer("Открой приложение и выбери раздел «Оплата», чтобы купить вращения картой/СБП, TON или Telegram Stars.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Открыть оплату", web_app=WebAppInfo(url=WEBAPP_URL))]]))
+
 @dp.message(F.text == "🎰 Рулетка")
 async def menu_roulette(m: Message):
     await m.answer("Открывай рулетку кнопкой ниже:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎰 Открыть рулетку",web_app=WebAppInfo(url=WEBAPP_URL))]]))
@@ -581,12 +584,12 @@ async def menu_roulette(m: Message):
 @dp.message(F.text == "👤 Профиль")
 async def menu_profile(m: Message):
     with db() as c:
-        u=c.execute("SELECT spins,points FROM users WHERE telegram_id=?",(m.from_user.id,)).fetchone()
+        u=c.execute("SELECT spins FROM users WHERE telegram_id=?",(m.from_user.id,)).fetchone()
         wins=c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=?",(m.from_user.id,)).fetchone()["n"]
         pending=c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=? AND claimed=0",(m.from_user.id,)).fetchone()["n"]
     if not u:
         await m.answer("Профиль пока пуст. Нажми /start.",reply_markup=reply_menu()); return
-    await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nБаллы: {u['points']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
+    await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
 
 @dp.message(F.text == "🎟 Купить вращения")
 async def menu_buy(m: Message):
