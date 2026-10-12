@@ -68,8 +68,8 @@ def init_db():
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS admins(telegram_id INTEGER PRIMARY KEY, added_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
-        c.execute("SELECT COUNT(*) n FROM prizes")
-        if c.fetchone()["n"] == 0:
+    cur = c.execute("SELECT COUNT(*) n FROM prizes")
+     if cur.fetchone()["n"] == 0:
             seeds = [
                 ("points5","5 баллов","Небольшой бонус","", "Обычный",45,5,"points",""),
                 ("points10","10 баллов","Бонус","", "Редкий",28,10,"points",""),
