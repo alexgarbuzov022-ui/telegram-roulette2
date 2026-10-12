@@ -264,12 +264,49 @@ async def spin(authorization: str|None=Header(default=None)):
             raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
         rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
         if not rows: raise HTTPException(500, "Нет активных призов")
-        total = sum(float(r["weight"]) for r in rows)
-        n = secrets.randbelow(10**9)/10**9*total
-        chosen = rows[-1]; acc = 0.0
+        # Rarity values requested by the user (70/45/25/10/3) cannot be
+        # literal percentages because they sum to 153%. Treat them as relative
+        # odds and normalize over the rarity tiers that actually have enabled prizes.
+        rarity_weights = {
+            "обычный": 70.0, "common": 70.0,
+            "редкий": 45.0, "rare": 45.0,
+            "эпический": 25.0, "эпическая": 25.0, "epic": 25.0,
+            "легендарный": 10.0, "легендарная": 10.0, "legendary": 10.0,
+            "мифический": 3.0, "мифическая": 3.0, "mythic": 3.0, "mythical": 3.0,
+        }
+        def rarity_key(prize):
+            return str(prize["rarity"] or "обычный").strip().lower()
+        groups = {}
         for r in rows:
-            acc += float(r["weight"])
-            if n < acc: chosen = r; break
+            key = rarity_key(r)
+            group_weight = rarity_weights.get(key, 70.0)
+            groups.setdefault(key, {"rarity_weight": group_weight, "prizes": []})
+            prize_weight = max(0.0, float(r["weight"]))
+            if prize_weight > 0:
+                groups[key]["prizes"].append((r, prize_weight))
+        groups = {k: v for k, v in groups.items() if v["prizes"]}
+        if not groups:
+            raise HTTPException(500, "Нет активных призов с корректным весом")
+        total_rarity_weight = sum(v["rarity_weight"] for v in groups.values())
+        n = secrets.randbelow(10**9)/10**9*total_rarity_weight
+        chosen_group = next(iter(groups.values()))
+        acc = 0.0
+        for group in groups.values():
+            acc += group["rarity_weight"]
+            if n < acc:
+                chosen_group = group
+                break
+        # Existing per-prize weight still controls selection among prizes of the same rarity.
+        group_prizes = chosen_group["prizes"]
+        total_prize_weight = sum(w for _, w in group_prizes)
+        n = secrets.randbelow(10**9)/10**9*total_prize_weight
+        chosen = group_prizes[-1][0]
+        acc = 0.0
+        for r, w in group_prizes:
+            acc += w
+            if n < acc:
+                chosen = r
+                break
         if chosen["prize_type"] == "spins":
             bonus_spins = max(0, int(chosen["points"] or 0))
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
@@ -277,16 +314,29 @@ async def spin(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
-        delivery_payload = (chosen["delivery_value"] or "").strip()
+        delivery_payload = chosen["delivery_value"] or ""
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
-        if media_files:
-            delivery_payload = json.dumps({"media_files": media_files}, ensure_ascii=False)
-        # If no separate delivery content is set but the prize has an image/file_id,
-        # allow the user to claim that image from the bot instead of hiding the win.
-        if not delivery_payload and (chosen["image"] or "").strip():
-            delivery_payload = json.dumps({"media_files": [{"url": chosen["image"].strip(), "type": "photo"}]}, ensure_ascii=False)
+        # Pick one random photo/video for THIS win and store it in the spin row.
+        # Claiming the prize later sends that exact file; repeated wins may pick different files.
+        valid_media = [
+            x for x in media_files
+            if isinstance(x, dict) and str(x.get("url", "")).strip()
+            and str(x.get("type", "")).lower() in {"photo", "image", "video"}
+        ]
+        if valid_media:
+            picked_media = secrets.choice(valid_media)
+            media_type = str(picked_media.get("type", "")).lower()
+            if media_type == "image":
+                media_type = "photo"
+            delivery_payload = json.dumps({
+                "media_files": [{"url": str(picked_media["url"]).strip(), "type": media_type}]
+            }, ensure_ascii=False)
+        elif str(chosen["image"] or "").strip() and not str(delivery_payload).strip():
+            delivery_payload = json.dumps({
+                "media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]
+            }, ensure_ascii=False)
         c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload else 1))
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
     # Notify all configured admins about every win (including wins by admins).
     try:
         with db() as c:
@@ -544,8 +594,7 @@ def keyboard():
 
 def reply_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🎁 Мои призы")]
+        [KeyboardButton(text="💳 Оплата"), KeyboardButton(text="🎰 Рулетка"), KeyboardButton(text="👤 Профиль")]
     ], resize_keyboard=True, is_persistent=True)
 
 PACKS = {1:50, 3:120, 10:400}
@@ -624,12 +673,10 @@ async def send_my_prizes(chat_id: int, uid: int):
     for r in rows:
         text=f"🎁 {r['prize_label']}\nРедкость: {r['rarity']}\nВыигран: {r['created_at']}"
         if r['image']:
-            try:
-                await bot.send_photo(chat_id, r['image'], caption=text)
-            except Exception:
-                await bot.send_message(chat_id, text)
+            try: await bot.send_photo(chat_id,r['image'],caption=text)
+            except Exception: await bot.send_message(chat_id,text)
         else:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(chat_id,text)
         await bot.send_message(chat_id,"Нажми, чтобы получить приз:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🎁 Получить: {r['prize_label'][:35]}",callback_data=f"claim:{r['id']}")]]))
 
 @dp.callback_query(F.data.startswith("claim:"))
@@ -659,10 +706,8 @@ async def claim_prize(cb):
         except (ValueError, TypeError):
             pass
         if media_payload:
-            photos = [x["url"] for x in media_payload if x.get("type") in {"photo", "image", "картинка", "фото"} and x.get("url")]
-            videos = [x["url"] for x in media_payload if x.get("type") in {"video", "видео"} and x.get("url")]
-            notes = [x["url"] for x in media_payload if x.get("type") in {"video_note", "кружок"} and x.get("url")]
-            links = [x["url"] for x in media_payload if x.get("type") in {"link", "url", "ссылка", "text", "текст"} and x.get("url")]
+            photos = [x["url"] for x in media_payload if x.get("type") == "photo" and x.get("url")]
+            videos = [x["url"] for x in media_payload if x.get("type") == "video" and x.get("url")]
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
             # Telegram media groups accept up to 10 items; send larger collections in batches.
             for start in range(0, len(photos), 10):
@@ -671,12 +716,6 @@ async def claim_prize(cb):
                 await bot.send_media_group(cb.from_user.id, media)
             for url in videos:
                 await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
-            for url in notes:
-                await bot.send_video_note(cb.from_user.id, url)
-            for url in links:
-                await bot.send_message(cb.from_user.id, f"🎁 {row['prize_label']}\n{url}", disable_web_page_preview=False)
-            if not (photos or videos or notes or links):
-                raise ValueError("В настройках приза нет поддерживаемых файлов")
         elif kind in {"photo","image","картинка","фото"}:
             await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video","видео"}:
