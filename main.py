@@ -67,6 +67,7 @@ def init_db():
           id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL, method TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS admins(telegram_id INTEGER PRIMARY KEY, added_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS deleted_prizes(id INTEGER PRIMARY KEY AUTOINCREMENT, prize_json TEXT NOT NULL, deleted_by INTEGER, deleted_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
         # Migrate existing installations without deleting user data.
@@ -111,6 +112,48 @@ def init_db():
         for prize in starter_prizes:
             c.execute("""INSERT OR IGNORE INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files)
                          VALUES(?,?,?,?,?,?,?,?,?,?)""", prize)
+
+
+    with db() as c:
+        defaults = {
+            "card_payment_details": os.getenv("CARD_PAYMENT_DETAILS", "Реквизиты карты/СБП пока не настроены администратором."),
+            "ton_wallet_address": os.getenv("TON_WALLET_ADDRESS", "TON-кошелёк пока не настроен администратором."),
+            "rub_per_star": str(RUB_PER_STAR if "RUB_PER_STAR" in globals() else 2),
+        }
+        for key, value in defaults.items():
+            c.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)", (key, value))
+
+def get_setting(key, fallback=""):
+    try:
+        with db() as c:
+            row = c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else fallback
+    except Exception:
+        return fallback
+
+def pay_referral_reward(c, buyer_id):
+    """Reward inviter once after the buyer's first confirmed purchase; caller owns transaction."""
+    buyer = c.execute("SELECT referred_by, referral_paid FROM users WHERE telegram_id=?", (buyer_id,)).fetchone()
+    if not buyer or not buyer["referred_by"] or buyer["referral_paid"]:
+        return None
+    inviter = int(buyer["referred_by"])
+    if inviter == int(buyer_id):
+        c.execute("UPDATE users SET referral_paid=1 WHERE telegram_id=?", (buyer_id,))
+        return None
+    claimed = c.execute("UPDATE users SET referral_paid=1 WHERE telegram_id=? AND referral_paid=0", (buyer_id,))
+    if claimed.rowcount != 1:
+        return None
+    c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (inviter,))
+    c.execute("UPDATE users SET spins=spins+3 WHERE telegram_id=?", (inviter,))
+    return inviter
+
+async def notify_referral_reward(inviter_id, buyer_id):
+    if not inviter_id:
+        return
+    try:
+        await bot.send_message(inviter_id, f"🎉 Приглашённый тобой пользователь {buyer_id} впервые оплатил покупку! Тебе начислено 3 бонусных вращения.")
+    except Exception:
+        pass
 
 def audit(admin_id, action, details=""):
     with db() as c:
@@ -177,9 +220,11 @@ async def me(authorization: str|None=Header(default=None)):
         hist = c.execute("SELECT prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
+    bot_info = await bot.get_me()
+    referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
             "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"]} for r in hist],
-            "payments":[dict(r) for r in pays],"referrals":referrals,"is_admin":is_admin(uid)}
+            "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
 
 @app.get("/api/prizes")
 async def prizes():
@@ -256,8 +301,9 @@ async def spin(authorization: str|None=Header(default=None)):
 @app.get("/api/payment-options")
 async def payment_options(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
-    return {"rub_per_star":RUB_PER_STAR,"card_details":CARD_PAYMENT_DETAILS,"ton_wallet":TON_WALLET_ADDRESS,
-            "packs":[{"spins":n,"stars":price,"rub":price*RUB_PER_STAR} for n,price in PACKS.items()]}
+    rub_rate = max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
+    return {"rub_per_star":rub_rate,"card_details":get_setting("card_payment_details", CARD_PAYMENT_DETAILS),"ton_wallet":get_setting("ton_wallet_address", TON_WALLET_ADDRESS),
+            "packs":[{"spins":n,"stars":price,"rub":price*rub_rate} for n,price in PACKS.items()]}
 
 @app.post("/api/payment-receipt")
 async def upload_payment_receipt(file: UploadFile=File(...), authorization: str|None=Header(default=None)):
@@ -283,7 +329,8 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
     if method not in {"card","ton"}: raise HTTPException(400,"Выбери способ оплаты")
     proof=str(payload.get("proof","чек будет отправлен отдельно"))[:1500].strip()
     oid=uuid.uuid4().hex[:12]
-    details=json.dumps({"spins":n,"stars":PACKS[n],"rub":PACKS[n]*RUB_PER_STAR,"proof":proof},ensure_ascii=False)
+    rub_rate=max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
+    details=json.dumps({"spins":n,"stars":PACKS[n],"rub":PACKS[n]*rub_rate,"proof":proof},ensure_ascii=False)
     with db() as c:
         c.execute("INSERT INTO orders(id,telegram_id,method,status,details) VALUES(?,?,?,'pending',?)",(oid,uid,method,details))
     user_tag=f"@{payload.get('username')}" if payload.get("username") else "без username"
@@ -311,7 +358,7 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
                 await bot.send_message(admin_id, summary+"\n⚠️ Файл чека не приложен.", reply_markup=keyboard)
         except Exception as e:
             print(f"Could not notify admin {admin_id} about order {oid}: {e}")
-    return {"ok":True,"order_id":oid,"status":"pending","rub":PACKS[n]*RUB_PER_STAR}
+    return {"ok":True,"order_id":oid,"status":"pending","rub":PACKS[n]*rub_rate}
 
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
@@ -324,7 +371,22 @@ async def admin_overview(authorization: str|None=Header(default=None)):
         admins = c.execute("SELECT telegram_id FROM admins").fetchall()
     return {"prizes":[prize_dict(r) for r in ps],"orders":[dict(r) for r in orders],
             "users":[dict(r) for r in users],"audit":[dict(r) for r in logs],
-            "admins":[r["telegram_id"] for r in admins],"owner_ids":sorted(ADMIN_IDS)}
+            "admins":[r["telegram_id"] for r in admins],"owner_ids":sorted(ADMIN_IDS),
+            "payment_settings":{"card_details":get_setting("card_payment_details", CARD_PAYMENT_DETAILS),"ton_wallet":get_setting("ton_wallet_address", TON_WALLET_ADDRESS),"rub_per_star":int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)}}
+
+@app.post("/api/admin/payment-settings")
+async def save_payment_settings(payload: dict, authorization: str|None=Header(default=None)):
+    uid = require_admin(authorization)
+    card = str(payload.get("card_details", "")).strip()[:1000]
+    wallet = str(payload.get("ton_wallet", "")).strip()[:300]
+    try: rate = int(payload.get("rub_per_star", 2))
+    except (TypeError, ValueError): raise HTTPException(400, "Курс должен быть числом")
+    if rate < 1 or rate > 100000: raise HTTPException(400, "Курс должен быть от 1 до 100000")
+    with db() as c:
+        for key, value in (("card_payment_details", card), ("ton_wallet_address", wallet), ("rub_per_star", str(rate))):
+            c.execute("INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    audit(uid, "save_payment_settings", f"card_set={bool(card)}; ton_set={bool(wallet)}; rub_per_star={rate}")
+    return {"ok": True}
 
 @app.post("/api/admin/prizes")
 async def save_prize(payload: dict, authorization: str|None=Header(default=None)):
@@ -422,13 +484,17 @@ async def approve_order(oid: str, authorization: str|None=Header(default=None)):
         except Exception: info={}
         spins=int(info.get("spins",0))
         if spins not in PACKS: raise HTTPException(400,"В заявке указан неизвестный пакет")
-        c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'", (oid,))
+        cur = c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'", (oid,))
+        if cur.rowcount != 1:
+            return {"ok":True,"status":"already_processed"}
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
         c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
+        inviter_id = pay_referral_reward(c, row["telegram_id"])
     audit(uid,"approve_order",oid)
     try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
     except Exception: pass
-    return {"ok":True,"spins_added":spins}
+    await notify_referral_reward(inviter_id, row["telegram_id"])
+    return {"ok":True,"spins_added":spins,"referral_rewarded":bool(inviter_id)}
 
 @app.post("/api/admin/orders/{oid}/reject")
 async def reject_order(oid: str, authorization: str|None=Header(default=None)):
@@ -484,7 +550,26 @@ CARD_PAYMENT_DETAILS = os.getenv("CARD_PAYMENT_DETAILS", "Укажи рекви�
 TON_WALLET_ADDRESS = os.getenv("TON_WALLET_ADDRESS", "Укажи адрес TON-кошелька в Render → Environment: TON_WALLET_ADDRESS")
 @dp.message(CommandStart())
 async def start(m: Message):
-    await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.", reply_markup=reply_menu())
+    inviter_id = None
+    if m.text:
+        parts = m.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].startswith("ref_"):
+            try:
+                candidate = int(parts[1][4:])
+                if candidate > 0 and candidate != m.from_user.id:
+                    inviter_id = candidate
+            except ValueError:
+                pass
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (m.from_user.id,))
+        if inviter_id is not None:
+            c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (inviter_id,))
+            c.execute("UPDATE users SET referred_by=? WHERE telegram_id=? AND referred_by IS NULL AND referral_paid=0", (inviter_id, m.from_user.id))
+    me = await bot.get_me()
+    referral_link = f"https://t.me/{me.username}?start=ref_{m.from_user.id}"
+    await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.\n\n"
+                   "👥 Приглашай друзей: за первую подтверждённую покупку друга получишь 3 вращения.\n"
+                   f"Твоя ссылка: {referral_link}", reply_markup=reply_menu())
     await m.answer("Нажми, чтобы открыть рулетку:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]
     ]))
@@ -619,12 +704,16 @@ async def bot_approve_payment(callback):
         spins=int(info.get("spins",0))
         if spins not in PACKS:
             await callback.answer("Некорректный пакет", show_alert=True); return
-        c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'",(oid,))
+        cur=c.execute("UPDATE orders SET status='approved' WHERE id=? AND status='pending'",(oid,))
+        if cur.rowcount != 1:
+            await callback.answer("Заявка уже обработана", show_alert=True); return
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
         c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
+        inviter_id = pay_referral_reward(c, row["telegram_id"])
     audit(uid,"approve_order_bot",oid)
     try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
     except Exception: pass
+    await notify_referral_reward(inviter_id, row["telegram_id"])
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.reply(f"✅ Заявка {oid} подтверждена администратором {uid}. Начислено {spins} вращений пользователю {row['telegram_id']}.")
@@ -673,7 +762,11 @@ async def paid(m: Message):
         if cur.rowcount:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(uid,))
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(n,uid))
-    # Оплата обработана; баланс обновится в Mini App без отдельного сообщения в чате.
+            inviter_id = pay_referral_reward(c, uid)
+        else:
+            inviter_id = None
+    await notify_referral_reward(inviter_id, uid)
+    # Баланс обновится в Mini App; пригласивший получит уведомление о бонусе.
 
 async def main():
     init_db()
