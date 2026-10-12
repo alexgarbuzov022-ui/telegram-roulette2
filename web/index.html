@@ -13,7 +13,7 @@ header{text-align:center}.tag{color:#d86bff;font-size:16px;font-weight:900;lette
 .roulette:before,.roulette:after{content:"";position:absolute;z-index:2;top:0;bottom:0;width:25px;pointer-events:none}.roulette:before{left:0;background:linear-gradient(90deg,#0b0714,transparent)}.roulette:after{right:0;background:linear-gradient(270deg,#0b0714,transparent)}
 .pointer{position:absolute;z-index:4;left:50%;top:0;bottom:0;width:3px;background:var(--gold);transform:translateX(-50%);box-shadow:0 0 13px var(--gold)}.pointer:before{content:"▼";position:absolute;top:-2px;left:50%;transform:translateX(-50%);color:var(--gold)}
 .viewport{overflow:hidden}.track{display:flex;gap:9px;padding:8px 0;will-change:transform}.prize{flex:0 0 116px;min-height:140px;border:1px solid var(--edge,#8f35ff);border-radius:13px;background:linear-gradient(155deg,var(--tint,#291444),#131219 75%);padding:8px 7px;display:flex;flex-direction:column;align-items:center;text-align:center;justify-content:center;box-shadow:inset 0 0 13px #ffffff08}
-.prize img{width:58px;height:58px;object-fit:contain;border-radius:8px;margin-bottom:7px}.emoji{font-size:34px;line-height:1.2;margin-bottom:7px}.name{font-size:12px;font-weight:850;line-height:1.25}.desc{font-size:10px;color:#c4c0ce;margin-top:4px}.rarity{font-size:10px;color:var(--gold);margin-top:5px}.chance{font-size:10px;color:#aaa;margin-top:3px}.winner{border-color:#fff0a5;box-shadow:0 0 24px #c64dff80}
+.prize img{width:58px;height:58px;object-fit:contain;border-radius:8px;margin-bottom:7px}.emoji{font-size:34px;line-height:1.2;margin-bottom:7px}.name{font-size:12px;font-weight:850;line-height:1.25}.desc{font-size:10px;color:#c4c0ce;margin-top:4px}.rarity{font-size:10px;color:var(--gold);margin-top:5px}.chance{font-size:10px;color:#aaa;margin-top:3px}.winner{border-color:#fff0a5;box-shadow:0 0 24px #c64dff80}.winner.win-reveal{z-index:6;animation:winnerCard 1.15s cubic-bezier(.2,.85,.25,1) both}.winner.win-reveal img,.winner.win-reveal .emoji{animation:winnerIcon 1.1s cubic-bezier(.2,.85,.25,1) both;filter:drop-shadow(0 0 15px #ffe88a)}@keyframes winnerCard{0%{transform:scale(1)}35%{transform:scale(1.2)}65%{transform:scale(1.12)}100%{transform:scale(1.08)}}@keyframes winnerIcon{0%{transform:scale(1)}35%{transform:scale(1.7) rotate(-8deg)}65%{transform:scale(1.35) rotate(5deg)}100%{transform:scale(1.3)}}
 button.primary{width:100%;border:1px solid #f5d8ff;border-radius:13px;padding:15px;font-size:16px;font-weight:900;color:#ffffff;background:linear-gradient(100deg,#c300ff,#4520ff);margin-top:12px}button:disabled{opacity:.55}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tile{background:#15141b;border:1px solid #38303f;border-radius:14px;padding:10px;text-align:center}.tile img{width:100%;height:100px;object-fit:contain}.tile .emoji{font-size:42px}.tile b{display:block;font-size:13px}.tile p{font-size:11px;color:#bbb;min-height:26px}.tile small{color:var(--gold)}
 #result{text-align:center;white-space:pre-line;min-height:32px;margin:12px 0;color:#f5d8ff;font-weight:850}.history-item{display:flex;align-items:center;gap:9px;border-bottom:1px solid #2b2832;padding:8px 0;font-size:12px}.history-item img{width:34px;height:34px;object-fit:contain}.history-item small{display:block;color:#aaa}.hidden{display:none!important}
@@ -76,7 +76,54 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelect
 function rarityClass(rarity){const r=String(rarity||'').toLowerCase();if(r.includes('миф'))return 'mythic';if(r.includes('леген'))return 'legendary';if(r.includes('эпич'))return 'epic';if(r.includes('редк'))return 'rare';return 'common'}
 function showRarityEffect(rarity){const roulette=document.querySelector('.roulette');roulette.classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');const level=rarityClass(rarity);void roulette.offsetWidth;roulette.classList.add('rarity-'+level);if(['epic','legendary','mythic'].includes(level)){const burst=document.createElement('div');burst.className='rarity-burst';const colors=level==='mythic'?['#ff3eaf','#ff77cf','#fff','#a855f7']:level==='legendary'?['#ffbf36','#fff0a8','#fff','#ff8c2a']:['#b44dff','#e0a5ff','#fff','#7c3aed'];const count=level==='mythic'?58:level==='legendary'?42:26;for(let i=0;i<count;i++){const bit=document.createElement('i');const angle=Math.random()*Math.PI*2;const distance=90+Math.random()*(level==='mythic'?280:210);bit.style.setProperty('--dx',Math.cos(angle)*distance+'px');bit.style.setProperty('--dy',Math.sin(angle)*distance+'px');bit.style.setProperty('--burst-color',colors[i%colors.length]);bit.style.left=(50+(Math.random()-.5)*10)+'%';bit.style.top=(42+(Math.random()-.5)*10)+'%';bit.style.animationDelay=(Math.random()*.18)+'s';burst.appendChild(bit)}document.body.appendChild(burst);setTimeout(()=>burst.remove(),1600)}if(tg?.HapticFeedback){try{tg.HapticFeedback.notificationOccurred(level==='mythic'||level==='legendary'?'success':'success');if(level==='mythic'||level==='legendary')tg.HapticFeedback.impactOccurred('heavy');else if(level==='epic')tg.HapticFeedback.impactOccurred('medium')}catch(e){}}}
 
-document.querySelector('#spin').onclick=async()=>{if(busy)return;if(document.querySelector('#spin').dataset.ready!=='1'){document.querySelector('#result').textContent='Открой раздел «Оплата» и выбери пакет вращений.';return}busy=true;const b=document.querySelector('#spin');b.disabled=true;document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');try{const out=await req('/api/spin','POST');const win=prizes.find(p=>p.id===out.prize_id)||prizes[0];fillTrack(win);const track=document.querySelector('#track'),viewport=document.querySelector('.viewport'),cardEl=track.children[42];cardEl.classList.add('winner');const step=125;const target=42*step+cardEl.offsetWidth/2-viewport.clientWidth/2;track.getBoundingClientRect();track.style.transition='transform 4.2s cubic-bezier(.08,.72,.12,1)';track.style.transform='translateX('+(-target)+'px)';await new Promise(r=>setTimeout(r,4350));showRarityEffect(out.rarity);document.querySelector('#result').textContent='🎉 Выпало: '+out.prize+' — '+out.rarity+(out.claimable?'\n🎁 Получите приз в боте: откройте чат с ботом и нажмите «Мои призы».':'');tg?.HapticFeedback?.notificationOccurred('success');await refresh()}catch(e){document.querySelector('#result').textContent=e.message;await refresh().catch(()=>{})}finally{busy=false;b.disabled=false}};
+let awaitingClaim=false;
+document.querySelector('#spin').onclick=async()=>{
+ if(busy||awaitingClaim)return;
+ if(document.querySelector('#spin').dataset.ready!=='1'){document.querySelector('#result').textContent='Открой раздел «Оплата» и выбери пакет вращений.';return}
+ busy=true;const b=document.querySelector('#spin');b.disabled=true;
+ document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
+ document.querySelector('#result').textContent='';
+ try{
+  const out=await req('/api/spin','POST');
+  const win=prizes.find(p=>p.id===out.prize_id)||prizes[0];
+  fillTrack(win);
+  const track=document.querySelector('#track'),viewport=document.querySelector('.viewport'),cardEl=track.children[42];
+  cardEl.classList.add('winner');
+  const step=125;
+  const target=42*step+cardEl.offsetWidth/2-viewport.clientWidth/2;
+  track.getBoundingClientRect();
+  track.style.transition='transform 7.2s cubic-bezier(.06,.68,.12,1)';
+  track.style.transform='translateX('+(-target)+'px)';
+  await new Promise(r=>setTimeout(r,7350));
+  cardEl.classList.add('win-reveal');
+  showRarityEffect(out.rarity);
+  awaitingClaim=true;
+  b.disabled=true;
+  document.querySelector('#result').innerHTML='<div>🎉 Выпало: <b>'+esc(out.prize)+'</b> — '+esc(out.rarity)+'</div>'+(out.claimable?'<div class="muted" style="margin:6px 0">Приз можно забрать в боте: «🎁 Мои призы».</div>':'')+'<button class="primary" id="ackPrize" type="button">🎁 Получить приз</button>';
+  document.querySelector('#ackPrize').onclick=async()=>{
+   document.querySelector('#ackPrize').disabled=true;
+   if(out.claimable) document.querySelector('#result').innerHTML='<div>🎁 Приз сохранён! Чтобы получить фото или видео, открой чат с ботом и нажми «🎁 Мои призы».</div>';
+   else document.querySelector('#result').textContent='Готово! Можно крутить снова.';
+   document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
+   cardEl.classList.remove('winner','win-reveal');
+   track.style.transition='none';track.style.transform='translateX(0)';
+   fillTrack();
+   awaitingClaim=false;
+   busy=false;
+   await refresh();
+  };
+  tg?.HapticFeedback?.notificationOccurred('success');
+  // Update balance without rebuilding the winning track.
+  const me=await req('/api/me');
+  document.querySelector('#spins').textContent=me.spins;
+  document.querySelector('#profileSpins').textContent=me.spins;
+ }catch(e){
+  document.querySelector('#result').textContent=e.message;
+  awaitingClaim=false;busy=false;b.disabled=false;
+  await refresh().catch(()=>{});
+ }
+ finally{busy=false;if(!awaitingClaim)b.disabled=false}
+}
 let currentPaymentDetails='';
 async function loadPaymentOptions(){try{const d=await req('/api/payment-options');const method=document.querySelector('#altMethod').value;currentPaymentDetails=String(method==='card'?d.card_details:d.ton_wallet||'').trim();document.querySelector('#paymentDetails').textContent=method==='card'?'Реквизиты карты / СБП: '+(currentPaymentDetails||'Администратор ещё не указал реквизиты'):'Адрес TON-кошелька: '+(currentPaymentDetails||'Администратор ещё не указал кошелёк');const cb=document.querySelector('#copyPaymentDetails');cb.disabled=!currentPaymentDetails;cb.textContent=method==='card'?'📋 Копировать реквизиты карты / СБП':'📋 Копировать адрес TON';document.querySelector('#copyStatus').textContent='';}catch(e){document.querySelector('#paymentDetails').textContent=e.message;document.querySelector('#copyPaymentDetails').disabled=true}}
 async function copyTextCompat(text){if(!text)throw Error('Реквизиты ещё не настроены.');try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return}}catch(e){}const ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';ta.style.fontSize='16px';document.body.appendChild(ta);ta.focus();ta.select();ta.setSelectionRange(0,ta.value.length);let ok=false;try{ok=document.execCommand('copy')}catch(e){}ta.remove();if(!ok)throw Error('Не удалось скопировать автоматически. Нажми и удерживай реквизиты, чтобы скопировать вручную.')}
