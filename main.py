@@ -465,28 +465,39 @@ async def save_payment_settings(payload: dict, authorization: str|None=Header(de
 @app.post("/api/admin/prizes")
 async def save_prize(payload: dict, authorization: str|None=Header(default=None)):
     uid = require_admin(authorization)
-    name = str(payload.get("name","")).strip()
-    if not name: raise HTTPException(400,"Укажи название приза")
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "Укажи название приза")
     pid = str(payload.get("id") or uuid.uuid4().hex[:12])
-    weight = max(0.0, min(1000000.0, float(payload.get("weight",1))))
-    rarity = str(payload.get("rarity","Обычный"))[:40]
-    points = max(0,min(100000000,int(payload.get("points",0))))
+    try:
+        weight = max(0.0, min(1000000.0, float(payload.get("weight", 1))))
+        points = max(0, min(100000000, int(payload.get("points", 0))))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Вес и количество баллов должны быть числами")
+    rarity = str(payload.get("rarity", "Обычный"))[:40]
+    media_files = payload.get("media_files", [])
+    if not isinstance(media_files, list):
+        raise HTTPException(400, "Список медиафайлов задан неверно")
+    media_json = json.dumps(
+        [{"url": str(x.get("url", ""))[:1000], "type": str(x.get("type", ""))[:20]}
+         for x in media_files if isinstance(x, dict) and x.get("url")],
+        ensure_ascii=False,
+    )
+    media_pool = str(payload.get("media_pool", ""))[:30]
+    if media_pool not in {"", "photo", "video_noface", "video_face"}:
+        raise HTTPException(400, "Неизвестная категория медиа")
     with db() as c:
-        media_files = payload.get("media_files", [])
-        if not isinstance(media_files, list):
-            raise HTTPException(400, "Список медиафайлов задан неверно")
-        media_json = json.dumps([{"url":str(x.get("url",""))[:1000],"type":str(x.get("type",""))[:20]} for x in media_files if isinstance(x,dict) and x.get("url")], ensure_ascii=False)
-        media_pool = str(payload.get("media_pool",""))[:30]
-    if media_pool not in {"","photo","video_noface","video_face"}:
-        raise HTTPException(400,"Неизвестная категория медиа")
-    c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files,enabled,media_pool)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
-        image=excluded.image,rarity=excluded.rarity,weight=excluded.weight,points=excluded.points,
-        prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,enabled=excluded.enabled,media_pool=excluded.media_pool""",
-        (pid,name,str(payload.get("description",""))[:2000],str(payload.get("image",""))[:1000],rarity,weight,points,
-         str(payload.get("type","points"))[:30],str(payload.get("delivery_value",""))[:2000],media_json,1 if payload.get("enabled",True) else 0,media_pool))
-    audit(uid,"save_prize",f"{pid}: {name}; weight={weight}; rarity={rarity}")
-    return {"ok":True,"id":pid}
+        c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files,enabled,media_pool)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
+            image=excluded.image,rarity=excluded.rarity,weight=excluded.weight,points=excluded.points,
+            prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,
+            enabled=excluded.enabled,media_pool=excluded.media_pool""",
+            (pid, name, str(payload.get("description", ""))[:2000], str(payload.get("image", ""))[:1000],
+             rarity, weight, points, str(payload.get("type", "points"))[:30],
+             str(payload.get("delivery_value", ""))[:2000], media_json,
+             1 if payload.get("enabled", True) else 0, media_pool))
+    audit(uid, "save_prize", f"{pid}: {name}; weight={weight}; rarity={rarity}; media={len(media_files)}")
+    return {"ok": True, "id": pid}
 
 @app.delete("/api/admin/prizes/{pid}")
 async def delete_prize(pid: str, authorization: str|None=Header(default=None)):
