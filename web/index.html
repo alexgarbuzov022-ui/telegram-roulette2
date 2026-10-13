@@ -65,25 +65,10 @@ input,textarea,select{width:100%;padding:10px;border-radius:9px;border:1px solid
 .collection-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:10px}.collection-card{position:relative;min-width:0;padding:10px;border:1px solid var(--rarity-color,#aaa);border-radius:14px;background:linear-gradient(145deg,color-mix(in srgb,var(--rarity-color,#aaa) 18%,#15121c),#111016 72%);box-shadow:0 0 15px color-mix(in srgb,var(--rarity-color,#aaa) 20%,transparent)}.collection-card img{width:100%;height:100px;object-fit:contain;border-radius:9px}.collection-card .collection-name{font-weight:850;font-size:12px;margin-top:6px}.collection-card small{display:block;color:#c7bfce;font-size:10px;margin-top:4px}.collection-state{display:inline-block;margin-top:7px;padding:4px 7px;border-radius:8px;background:#ffffff12;font-size:10px}
 
 
-/* Универсальная обратная связь на нажатие в Telegram Mini App */
-button, [role="button"], .btn, a.button, input[type="button"], input[type="submit"] {
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-  transition: transform .12s ease, filter .12s ease, box-shadow .12s ease, opacity .12s ease;
-  cursor: pointer;
-}
-button:active, [role="button"]:active, .btn:active, a.button:active,
-input[type="button"]:active, input[type="submit"]:active,
-button.is-pressed, [role="button"].is-pressed, .btn.is-pressed, a.button.is-pressed {
-  transform: scale(.97) !important;
-  filter: brightness(1.28) !important;
-  box-shadow: 0 0 0 2px rgba(190,120,255,.42), 0 0 22px rgba(150,70,255,.24) !important;
-}
-button:disabled, [role="button"][aria-disabled="true"], .btn:disabled {
-  opacity: .62; cursor: wait;
-}
-@media (prefers-reduced-motion: reduce) { button, [role="button"], .btn, a.button { transition: none; } }
-
+/* Clear touch feedback for Telegram Mini App buttons */
+button, .btn, [role="button"] { -webkit-tap-highlight-color: transparent; transition: transform .09s ease, filter .12s ease, box-shadow .12s ease; touch-action: manipulation; }
+button:active, .btn:active, [role="button"]:active { transform: scale(.975); filter: brightness(1.25); box-shadow: 0 0 0 2px rgba(211,76,255,.35), 0 0 18px rgba(211,76,255,.35); }
+button:disabled { opacity: .72; }
 </style></head><body><main>
 <header><div class="tag">XDarryanaX</div><h1>💜 Призовая рулетка</h1><p class="muted">Выигрывай почти задаром! 🔥</p><p class="muted">📸 Фото • 🎥 Видео • 💎 Скидки • 🔒 Приват • ✨ Эксклюзив</p><p class="muted">Крути рулетку и забирай свои призы!</p></header>
 <div class="stats"><div class="stat">Вращения<span class="num" id="spins">—</span></div></div>
@@ -208,22 +193,4 @@ document.querySelector('#savePaymentSettings')?.addEventListener('click',async()
 document.querySelector('#addAdmin').onclick=async()=>{try{await req('/api/admin/admins','POST',{telegram_id:Number(document.querySelector('#newAdmin').value)});document.querySelector('#adminMsg').textContent='Администратор добавлен'}catch(e){document.querySelector('#adminMsg').textContent=e.message}};
 document.querySelector('#broadcast').onclick=async()=>{try{const d=await req('/api/admin/broadcast','POST',{text:document.querySelector('#broadcastText').value});document.querySelector('#adminMsg').textContent='Отправлено: '+d.sent}catch(e){document.querySelector('#adminMsg').textContent=e.message}};
 refresh().catch(e=>{document.querySelector('#result').textContent='Открой Mini App через Telegram. '+e.message});
-</script>
-<script>
-/* Короткий видимый отклик на касание — не меняет логику кнопок */
-(function () {
-  let pressedTimer;
-  document.addEventListener('pointerdown', function (ev) {
-    const el = ev.target && ev.target.closest && ev.target.closest('button, [role="button"], .btn, a.button, input[type="button"], input[type="submit"]');
-    if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return;
-    el.classList.add('is-pressed');
-    clearTimeout(pressedTimer);
-    pressedTimer = setTimeout(() => el.classList.remove('is-pressed'), 220);
-  }, {passive:true});
-  ['pointerup','pointercancel','pointerleave'].forEach(type => document.addEventListener(type, function(ev){
-    const el = ev.target && ev.target.closest && ev.target.closest('.is-pressed');
-    if (el) setTimeout(() => el.classList.remove('is-pressed'), 160);
-  }, {passive:true}));
-})();
-</script>
-</body></html>
+</script></body></html>
