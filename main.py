@@ -47,7 +47,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(
           telegram_id INTEGER PRIMARY KEY, spins INTEGER NOT NULL DEFAULT 0 CHECK(spins>=0),
           points INTEGER NOT NULL DEFAULT 0 CHECK(points>=0), referred_by INTEGER,
-          referral_paid INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+          referral_paid INTEGER NOT NULL DEFAULT 0, daily_claimed_at TEXT DEFAULT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS prizes(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', image TEXT DEFAULT '',
           rarity TEXT NOT NULL DEFAULT 'Обычный', weight REAL NOT NULL DEFAULT 1,
@@ -72,6 +72,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS deleted_prizes(id INTEGER PRIMARY KEY AUTOINCREMENT, prize_json TEXT NOT NULL, deleted_by INTEGER, deleted_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
         # Migrate existing installations without deleting user data.
+        user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "daily_claimed_at" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN daily_claimed_at TEXT DEFAULT NULL")
         spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
         if "prize_type" not in spin_cols:
             c.execute("ALTER TABLE spins ADD COLUMN prize_type TEXT NOT NULL DEFAULT 'points'")
@@ -231,14 +234,42 @@ async def me(authorization: str|None=Header(default=None)):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
-        hist = c.execute("SELECT prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
+        hist = c.execute("SELECT id AS spin_id,prize_label,rarity,image,created_at,claimed,prize_type FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 50", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
     bot_info = await bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
-            "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"]} for r in hist],
+            "history":[{"spin_id":r["spin_id"],"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"],"claimed":bool(r["claimed"]),"prize_type":r["prize_type"]} for r in hist],
+            "daily_claimed_at":u["daily_claimed_at"],
             "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
+
+@app.post("/api/daily-bonus")
+async def daily_bonus(authorization: str|None=Header(default=None)):
+    uid = uid_from_header(authorization)
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+        user = c.execute("SELECT daily_claimed_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        last = user["daily_claimed_at"]
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last)
+                if last_dt.tzinfo is None: last_dt = last_dt.replace(tzinfo=timezone.utc)
+                remaining = 86400 - int((now-last_dt).total_seconds())
+                if remaining > 0:
+                    hours, rem = divmod(remaining, 3600)
+                    minutes = rem // 60
+                    raise HTTPException(409, f"Ежедневный бонус уже получен. Следующий через {hours} ч. {minutes} мин.")
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        c.execute("UPDATE users SET spins=spins+1,daily_claimed_at=? WHERE telegram_id=?", (now_iso, uid))
+        balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()["spins"]
+    return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"message":"Ежедневный бонус начислен: +1 вращение!"}
 
 @app.get("/api/prizes")
 async def prizes():
@@ -380,10 +411,10 @@ async def spin(authorization: str|None=Header(default=None)):
             try:
                 await bot.send_message(
                     admin_id,
-                    f"🎉 Выигрыш в рулетке!\\nПользователь: {user_label}\\n"
-                    f"Имя: {str(telegram_user.get('first_name', '') if 'telegram_user' in locals() else '')}\\n"
-                    f"ID: {uid}\\nПриз: {chosen['name']}\\n"
-                    f"Редкость: {chosen['rarity']}\\nID приза: {chosen['id']}"
+                    f"🎉 ВЫИГРЫШ В РУЛЕТКЕ!\n\n👤 Пользователь: {user_label}\n"
+                    f"Имя: {str(telegram_user.get('first_name', '') if 'telegram_user' in locals() else '')}\n"
+                    f"ID: {uid}\n\n🎁 Приз: {chosen['name']}\n"
+                    f"✨ Редкость: {chosen['rarity']}"
                 )
             except Exception as e:
                 print(f"Could not notify admin {admin_id} about prize win: {e}")
