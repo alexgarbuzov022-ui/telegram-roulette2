@@ -919,7 +919,15 @@ async def open_prize(cb):
         elif kind in {"photo", "image", "картинка", "фото"}:
             await bot.send_photo(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video", "видео"}:
-            await bot.send_video(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
+            # Поддерживаем несколько URL или Telegram file_id: по одному на строку
+            # (также можно разделять точкой с запятой). Не делим по пробелам,
+            # чтобы не повреждать URL с параметрами.
+            video_values = [part.strip() for line in value.splitlines() for part in line.split(";") if part.strip()]
+            if not video_values:
+                raise ValueError("Не указаны ссылки на видео")
+            for index, video_value in enumerate(video_values):
+                caption = f"🎉 Твой приз: {row['prize_label']}" if index == 0 else None
+                await bot.send_video(cb.from_user.id, video_value, caption=caption)
         elif kind in {"video_note", "кружок"}:
             await bot.send_video_note(cb.from_user.id, value)
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
