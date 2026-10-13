@@ -10,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uvicorn
 
 BASE = Path(__file__).resolve().parent
@@ -80,6 +80,8 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER NOT NULL DEFAULT 0")
         if "spin_discount_pct" not in user_cols:
             c.execute("ALTER TABLE users ADD COLUMN spin_discount_pct INTEGER NOT NULL DEFAULT 0")
+        if "spin_discount_expires_at" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN spin_discount_expires_at TEXT DEFAULT NULL")
         if "private_discount_pct" not in user_cols:
             c.execute("ALTER TABLE users ADD COLUMN private_discount_pct INTEGER NOT NULL DEFAULT 0")
         spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
@@ -243,9 +245,18 @@ async def me(authorization: str|None=Header(default=None)):
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
     bot_info = await bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    spin_discount_pct = int(u["spin_discount_pct"] or 0)
+    spin_discount_expires_at = u["spin_discount_expires_at"]
+    if spin_discount_pct:
+        try:
+            if not spin_discount_expires_at: raise ValueError("missing discount expiry")
+            expires = datetime.fromisoformat(spin_discount_expires_at)
+            if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= expires.astimezone(timezone.utc): spin_discount_pct = 0
+        except (ValueError, TypeError): spin_discount_pct = 0
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
             "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"],"prize_type":r["prize_type"],"claimed":r["claimed"]} for r in hist],
-            "daily_claimed_at":u["daily_claimed_at"],"daily_streak":u["daily_streak"],"daily_next_day":(int(u["daily_streak"] or 0)%7)+1,"spin_discount_pct":u["spin_discount_pct"],"private_discount_pct":u["private_discount_pct"],
+            "daily_claimed_at":u["daily_claimed_at"],"daily_streak":u["daily_streak"],"daily_next_day":(int(u["daily_streak"] or 0)%7)+1,"spin_discount_pct":spin_discount_pct,"spin_discount_expires_at":spin_discount_expires_at,"private_discount_pct":u["private_discount_pct"],
             "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
 
 @app.post("/api/daily-bonus")
@@ -275,8 +286,9 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
         else: streak = 1
         c.execute("UPDATE users SET daily_streak=?,daily_claimed_at=? WHERE telegram_id=?", (streak, now_iso, uid))
         if streak == 1:
-            c.execute("UPDATE users SET spin_discount_pct=10 WHERE telegram_id=?", (uid,))
-            reward_message = "Скидка 10% на покупку вращений во всех наборах активирована."
+            expires_iso = (now + timedelta(hours=24)).isoformat()
+            c.execute("UPDATE users SET spin_discount_pct=10,spin_discount_expires_at=? WHERE telegram_id=?", (expires_iso, uid))
+            reward_message = "Скидка 10% на одну покупку вращений в любом из трёх наборов активирована на 24 часа. После успешной оплаты скидка сгорит."
         elif streak == 2:
             c.execute("UPDATE users SET private_discount_pct=10 WHERE telegram_id=?", (uid,))
             reward_message = "Скидка 10% на приват получена. Покажи это сообщение при оформлении привата."
@@ -380,13 +392,20 @@ async def create_invoice(payload: dict, authorization: str|None=Header(default=N
     if n not in PACKS:
         raise HTTPException(400, "Такого набора нет")
     with db() as c:
-        user = c.execute("SELECT spin_discount_pct FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        user = c.execute("SELECT spin_discount_pct,spin_discount_expires_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
         discount_pct = int(user["spin_discount_pct"] or 0) if user else 0
+        if discount_pct:
+            try:
+                if not user["spin_discount_expires_at"]: raise ValueError("missing discount expiry")
+                expires = datetime.fromisoformat(user["spin_discount_expires_at"])
+                if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) >= expires.astimezone(timezone.utc): discount_pct = 0
+            except (ValueError, TypeError): discount_pct = 0
     amount = max(1, int(round(PACKS[n] * (100 - discount_pct) / 100)))
     link = await bot.create_invoice_link(
         title=f"{n} вращений рулетки",
         description=f"Пакет из {n} вращений виртуальной рулетки" + (f" (скидка {discount_pct}%)" if discount_pct else ""),
-        payload=f"spinpack:{uid}:{n}",
+        payload=f"spinpack:{uid}:{n}:{discount_pct}",
         currency="XTR",
         prices=[LabeledPrice(label=f"{n} вращений" + (f" −{discount_pct}%" if discount_pct else ""), amount=amount)],
         provider_token=""
@@ -525,8 +544,26 @@ async def api_claim_prize(payload: dict, authorization: str|None=Header(default=
 async def payment_options(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
     rub_rate = max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
-    return {"rub_per_star":rub_rate,"card_details":get_setting("card_payment_details", CARD_PAYMENT_DETAILS),"ton_wallet":get_setting("ton_wallet_address", TON_WALLET_ADDRESS),
-            "packs":[{"spins":n,"stars":price,"rub":price*rub_rate} for n,price in PACKS.items()]}
+    with db() as c:
+        user = c.execute("SELECT spin_discount_pct,spin_discount_expires_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        discount_pct = max(0, min(90, int(user["spin_discount_pct"] or 0))) if user else 0
+        if discount_pct:
+            try:
+                if not user or not user["spin_discount_expires_at"]: raise ValueError("missing discount expiry")
+                expires = datetime.fromisoformat(user["spin_discount_expires_at"])
+                if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) >= expires.astimezone(timezone.utc): discount_pct = 0
+            except (ValueError, TypeError): discount_pct = 0
+    packs = []
+    for n, price in PACKS.items():
+        discounted_stars = max(1, int(round(price * (100-discount_pct) / 100)))
+        base_rub = price * rub_rate
+        discounted_rub = max(1, int(round(base_rub * (100-discount_pct) / 100)))
+        packs.append({"spins": n, "stars": price, "discounted_stars": discounted_stars,
+                      "rub": base_rub, "discounted_rub": discounted_rub})
+    return {"rub_per_star":rub_rate,"spin_discount_pct":discount_pct,
+            "card_details":get_setting("card_payment_details", CARD_PAYMENT_DETAILS),
+            "ton_wallet":get_setting("ton_wallet_address", TON_WALLET_ADDRESS), "packs":packs}
 
 @app.post("/api/payment-receipt")
 async def upload_payment_receipt(file: UploadFile=File(...), authorization: str|None=Header(default=None)):
@@ -554,8 +591,18 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
     oid=uuid.uuid4().hex[:12]
     rub_rate=max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
     with db() as c:
-        user = c.execute("SELECT spin_discount_pct FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        pending_discount = c.execute("SELECT 1 FROM orders WHERE telegram_id=? AND status='pending' AND details LIKE '%\"discount_pct\": 10%' LIMIT 1", (uid,)).fetchone()
+        if pending_discount:
+            raise HTTPException(409, "У тебя уже есть ожидающая подтверждения заявка со скидкой. Дождись решения администратора.")
+        user = c.execute("SELECT spin_discount_pct,spin_discount_expires_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
         discount_pct = int(user["spin_discount_pct"] or 0) if user else 0
+        if discount_pct:
+            try:
+                if not user["spin_discount_expires_at"]: raise ValueError("missing discount expiry")
+                expires = datetime.fromisoformat(user["spin_discount_expires_at"])
+                if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) >= expires.astimezone(timezone.utc): discount_pct = 0
+            except (ValueError, TypeError): discount_pct = 0
     final_rub = round(PACKS[n] * rub_rate * (100-discount_pct) / 100)
     details=json.dumps({"spins":n,"stars":PACKS[n],"discount_pct":discount_pct,"rub":final_rub,"proof":proof},ensure_ascii=False)
     with db() as c:
@@ -766,6 +813,8 @@ async def approve_order(oid: str, authorization: str|None=Header(default=None)):
             return {"ok":True,"status":"already_processed"}
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
         c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
+        if int(info.get("discount_pct", 0) or 0) > 0:
+            c.execute("UPDATE users SET spin_discount_pct=0,spin_discount_expires_at=NULL WHERE telegram_id=? AND spin_discount_pct=?", (row["telegram_id"], int(info.get("discount_pct", 0))))
         inviter_id = pay_referral_reward(c, row["telegram_id"])
     audit(uid,"approve_order",oid)
     try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
@@ -1120,6 +1169,8 @@ async def bot_approve_payment(callback):
             await callback.answer("Заявка уже обработана", show_alert=True); return
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(row["telegram_id"],))
         c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(spins,row["telegram_id"]))
+        if int(info.get("discount_pct", 0) or 0) > 0:
+            c.execute("UPDATE users SET spin_discount_pct=0,spin_discount_expires_at=NULL WHERE telegram_id=? AND spin_discount_pct=?", (row["telegram_id"], int(info.get("discount_pct", 0))))
         inviter_id = pay_referral_reward(c, row["telegram_id"])
     audit(uid,"approve_order_bot",oid)
     try: await bot.send_message(row["telegram_id"],f"✅ Оплата подтверждена! Начислено вращений: {spins}. Сумма: {info.get('rub',0)} ₽.")
@@ -1160,19 +1211,52 @@ async def paysupport(m: Message):
 
 @dp.pre_checkout_query()
 async def checkout(q: PreCheckoutQuery):
+    # A discounted invoice can be paid only while that exact discount is still active.
+    parts = (q.invoice_payload or "").split(":")
+    if len(parts) >= 4 and parts[0] == "spinpack":
+        try:
+            uid = int(parts[1]); discount_pct = int(parts[3])
+        except (TypeError, ValueError):
+            await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Счёт некорректен. Создай новый счёт в приложении.")
+            return
+        if uid != q.from_user.id:
+            await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Этот счёт создан для другого пользователя.")
+            return
+        if discount_pct > 0:
+            with db() as c:
+                user = c.execute("SELECT spin_discount_pct,spin_discount_expires_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
+            valid = bool(user and int(user["spin_discount_pct"] or 0) == discount_pct and user["spin_discount_expires_at"])
+            if valid:
+                try:
+                    expires = datetime.fromisoformat(user["spin_discount_expires_at"])
+                    if expires.tzinfo is None: expires = expires.replace(tzinfo=timezone.utc)
+                    valid = datetime.now(timezone.utc) < expires.astimezone(timezone.utc)
+                except (ValueError, TypeError): valid = False
+            if not valid:
+                await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Скидка уже использована или истекла. Создай новый счёт без скидки.")
+                return
     await bot.answer_pre_checkout_query(q.id,ok=True)
 
 @dp.message(F.successful_payment)
 async def paid(m: Message):
     p=m.successful_payment; uid=m.from_user.id
-    try: n=int(p.invoice_payload.split(":")[-1])
-    except Exception: n=1
+    parts = p.invoice_payload.split(":")
+    try:
+        if len(parts) < 3 or parts[0] != "spinpack" or int(parts[1]) != uid: raise ValueError("bad payload")
+        n = int(parts[2])
+        invoice_discount_pct = int(parts[3]) if len(parts) > 3 else 0
+        if n not in PACKS: raise ValueError("bad pack")
+    except Exception:
+        await m.answer("⚠️ Не удалось проверить счёт. Напиши администратору и пришли чек оплаты.")
+        return
     with db() as c:
         cur=c.execute("INSERT OR IGNORE INTO payments(charge_id,telegram_id,total_amount,currency,spins_added) VALUES(?,?,?,?,?)",
                       (p.telegram_payment_charge_id,uid,p.total_amount,p.currency,n))
         if cur.rowcount:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)",(uid,))
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?",(n,uid))
+            if invoice_discount_pct > 0:
+                c.execute("UPDATE users SET spin_discount_pct=0,spin_discount_expires_at=NULL WHERE telegram_id=? AND spin_discount_pct=?", (uid, invoice_discount_pct))
             inviter_id = pay_referral_reward(c, uid)
         else:
             inviter_id = None
