@@ -277,38 +277,81 @@ def prize_dict(r):
             "enabled":bool(r["enabled"])}
 
 
-def upload_to_cloudinary(data: bytes, filename: str, content_type: str):
-    """Store uploaded prize media outside Render's temporary filesystem."""
-    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
-    api_key = os.getenv("CLOUDINARY_API_KEY", "").strip()
-    api_secret = os.getenv("CLOUDINARY_API_SECRET", "").strip()
-    if not (cloud_name and api_key and api_secret):
-        raise HTTPException(503, "Cloudinary не настроен: добавь CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY и CLOUDINARY_API_SECRET в Render Environment.")
-    try:
-        import cloudinary
-        import cloudinary.uploader
-        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
-        resource_type = "video" if (content_type or "").startswith("video/") else "image"
-        result = cloudinary.uploader.upload(
-            data,
-            resource_type=resource_type,
-            folder=os.getenv("CLOUDINARY_FOLDER", "telegram-roulette"),
-            public_id=Path(filename).stem,
-            overwrite=False,
-            unique_filename=True,
+def upload_to_b2(data: bytes, filename: str, content_type: str):
+    """Store prize media in the private Backblaze B2 bucket."""
+    key_id = os.getenv("B2_KEY_ID", "").strip()
+    application_key = os.getenv("B2_APPLICATION_KEY", "").strip()
+    bucket_name = os.getenv("B2_BUCKET_NAME", "").strip()
+
+    if not (key_id and application_key and bucket_name):
+        raise HTTPException(
+            status_code=503,
+            detail="Backblaze B2 is not configured. Check B2_KEY_ID, B2_APPLICATION_KEY and B2_BUCKET_NAME."
         )
-        url = result.get("secure_url")
-        if not url:
-            raise ValueError("Cloudinary не вернул secure_url")
-        return url
+
+    try:
+        from b2sdk.v2 import InMemoryAccountInfo, B2Api
+
+        info = InMemoryAccountInfo()
+        b2_api = B2Api(info)
+        b2_api.authorize_account("production", key_id, application_key)
+        bucket = b2_api.get_bucket_by_name(bucket_name)
+        bucket.upload_bytes(
+            data,
+            filename,
+            content_type=content_type or "application/octet-stream",
+        )
+        return f"{WEBAPP_URL.rstrip('/')}/media/{filename}"
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"Cloudinary upload failed: {exc}")
-        raise HTTPException(502, "Не удалось сохранить файл в Cloudinary. Проверь настройки Cloudinary и попробуй ещё раз.")
+        print(f"Backblaze B2 upload failed: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Не удалось сохранить файл в Backblaze B2. Проверь настройки B2 в Render."
+        )
+
+
+def download_from_b2(filename: str):
+    """Download one object from the private B2 bucket into memory."""
+    key_id = os.getenv("B2_KEY_ID", "").strip()
+    application_key = os.getenv("B2_APPLICATION_KEY", "").strip()
+    bucket_name = os.getenv("B2_BUCKET_NAME", "").strip()
+    if not (key_id and application_key and bucket_name):
+        raise HTTPException(status_code=503, detail="Backblaze B2 is not configured")
+
+    try:
+        from io import BytesIO
+        from b2sdk.v2 import InMemoryAccountInfo, B2Api
+
+        info = InMemoryAccountInfo()
+        b2_api = B2Api(info)
+        b2_api.authorize_account("production", key_id, application_key)
+        bucket = b2_api.get_bucket_by_name(bucket_name)
+        output = BytesIO()
+        bucket.download_file_by_name(filename).save_to(output)
+        return output.getvalue()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Backblaze B2 download failed for {filename}: {exc}")
+        raise HTTPException(status_code=404, detail="Файл не найден в Backblaze B2")
 
 @app.get("/")
 async def home(): return FileResponse(BASE / "web" / "index.html")
+
+@app.get("/media/{filename}")
+async def uploaded_media(filename: str):
+    # Only UUID-style generated names are expected; never accept folder paths.
+    safe = Path(filename).name
+    if safe != filename or not re.fullmatch(r"[0-9a-f]{32}\.(jpg|png|webp|gif|mp4|webm|mov)", safe, re.I):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    data = download_from_b2(safe)
+    import mimetypes
+    media_type = mimetypes.guess_type(safe)[0] or "application/octet-stream"
+    from fastapi.responses import Response
+    return Response(content=data, media_type=media_type, headers={"Cache-Control": "private, max-age=300"})
+
 
 @app.get("/uploads/{filename}")
 async def uploaded(filename: str):
@@ -906,7 +949,7 @@ async def upload_image(file: UploadFile=File(...), authorization: str|None=Heade
     ext = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif"}.get(file.content_type)
     if not ext: raise HTTPException(400,"Поддерживаются JPG, PNG, WEBP, GIF")
     name = uuid.uuid4().hex + ext
-    url = upload_to_cloudinary(data, name, file.content_type)
+    url = upload_to_b2(data, name, file.content_type)
     audit(uid,"upload_image",name)
     return {"url":url}
 
@@ -926,7 +969,7 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
         if not data or len(data)>20*1024*1024:
             raise HTTPException(413, "Каждый файл должен быть не больше 20 МБ")
         name=uuid.uuid4().hex+ext
-        url=upload_to_cloudinary(data, name, file.content_type or "")
+        url=upload_to_b2(data, name, file.content_type or "")
         results.append({"url":url,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
     audit(uid,"upload_media",f"files={len(results)}")
     return {"files":results}
@@ -959,7 +1002,7 @@ async def upload_media_pool(category: str, files: list[UploadFile]=File(...), au
         data=await file.read()
         if not data or len(data)>20*1024*1024: raise HTTPException(413,"Каждый файл должен быть не больше 20 МБ")
         name=uuid.uuid4().hex+ext
-        url=upload_to_cloudinary(data, name, ct)
+        url=upload_to_b2(data, name, ct)
         mt="photo" if ct.startswith("image/") else "video"
         with db() as c:
             cur=c.execute("INSERT INTO media_library(category,url,media_type) VALUES(?,?,?)",(category,url,mt))
