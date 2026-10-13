@@ -76,6 +76,12 @@ def init_db():
         user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
         if "daily_claimed_at" not in user_cols:
             c.execute("ALTER TABLE users ADD COLUMN daily_claimed_at TEXT DEFAULT NULL")
+        if "daily_streak" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER NOT NULL DEFAULT 0")
+        if "spin_discount_pct" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN spin_discount_pct INTEGER NOT NULL DEFAULT 0")
+        if "private_discount_pct" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN private_discount_pct INTEGER NOT NULL DEFAULT 0")
         spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
         if "prize_type" not in spin_cols:
             c.execute("ALTER TABLE spins ADD COLUMN prize_type TEXT NOT NULL DEFAULT 'points'")
@@ -232,14 +238,14 @@ async def me(authorization: str|None=Header(default=None)):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
-        hist = c.execute("SELECT prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
+        hist = c.execute("SELECT prize_label,rarity,image,created_at,prize_type,claimed FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
     bot_info = await bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
-            "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"]} for r in hist],
-            "daily_claimed_at":u["daily_claimed_at"],
+            "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"],"prize_type":r["prize_type"],"claimed":r["claimed"]} for r in hist],
+            "daily_claimed_at":u["daily_claimed_at"],"daily_streak":u["daily_streak"],"spin_discount_pct":u["spin_discount_pct"],"private_discount_pct":u["private_discount_pct"],
             "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
 
 @app.post("/api/daily-bonus")
@@ -247,28 +253,60 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
+    reward_message = ""
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
-        user = c.execute("SELECT daily_claimed_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        user = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
         last = user["daily_claimed_at"]
         if last:
             try:
                 last_dt = datetime.fromisoformat(last)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-                remaining = 86400 - int((now - last_dt.astimezone(timezone.utc)).total_seconds())
+                if last_dt.tzinfo is None: last_dt = last_dt.replace(tzinfo=timezone.utc)
+                elapsed = (now - last_dt.astimezone(timezone.utc)).total_seconds()
+                remaining = 86400 - int(elapsed)
                 if remaining > 0:
                     hours, rem = divmod(remaining, 3600)
-                    minutes = rem // 60
-                    raise HTTPException(409, f"Ежедневный бонус уже получен. Следующий через {hours} ч. {minutes} мин.")
-            except HTTPException:
-                raise
-            except (ValueError, TypeError, OverflowError):
-                pass
-        c.execute("UPDATE users SET spins=spins+1,daily_claimed_at=? WHERE telegram_id=?", (now_iso, uid))
+                    raise HTTPException(409, f"Бонус уже получен. Следующий через {hours} ч. {rem//60} мин.")
+                # Keep the chain if the next claim is within 48 hours; otherwise restart.
+                streak = (int(user["daily_streak"] or 0) % 7 + 1) if elapsed <= 172800 else 1
+            except HTTPException: raise
+            except (ValueError, TypeError, OverflowError): streak = 1
+        else: streak = 1
+        c.execute("UPDATE users SET daily_streak=?,daily_claimed_at=? WHERE telegram_id=?", (streak, now_iso, uid))
+        if streak == 1:
+            c.execute("UPDATE users SET spin_discount_pct=10 WHERE telegram_id=?", (uid,))
+            reward_message = "Скидка 10% на покупку вращений во всех наборах активирована."
+        elif streak == 2:
+            c.execute("UPDATE users SET private_discount_pct=10 WHERE telegram_id=?", (uid,))
+            reward_message = "Скидка 10% на приват получена. Покажи это сообщение при оформлении привата."
+        elif streak == 3:
+            # Use an admin-configured circle prize if one exists; never fabricate media.
+            circle = c.execute("SELECT * FROM prizes WHERE enabled=1 AND lower(prize_type) IN ('video_note','кружок') AND (delivery_value<>'' OR media_files<>'[]') ORDER BY RANDOM() LIMIT 1").fetchone()
+            if circle:
+                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,0)", (uid,circle['id'],circle['name'],circle['rarity'],circle['image'],circle['prize_type'],circle['delivery_value']))
+                reward_message = "Кружок добавлен в «Мои призы». Забери его и перешли сообщение в личку модели @XDarryanaX."
+            else:
+                reward_message = "Бонус дня: кружок в личку! Пока в админ-панели не загружен кружок — напиши администратору @XDarryanaX, чтобы получить его."
+        elif streak == 4:
+            c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
+            reward_message = "Одно бесплатное вращение начислено!"
+        elif streak == 5:
+            c.execute("UPDATE users SET spins=spins+2 WHERE telegram_id=?", (uid,))
+            reward_message = "+2 бесплатных вращения начислены!"
+        elif streak == 6:
+            c.execute("UPDATE users SET private_discount_pct=25 WHERE telegram_id=?", (uid,))
+            reward_message = "Скидка 25% на приват получена. Покажи это сообщение при оформлении привата."
+        else:
+            prize = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0 ORDER BY RANDOM() LIMIT 1").fetchone()
+            if prize:
+                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,0)", (uid,prize['id'],prize['name'],prize['rarity'],prize['image'],prize['prize_type'],prize['delivery_value']))
+                reward_message = f"Сюрприз дня: «{prize['name']}» добавлен в «Мои призы»!"
+            else:
+                c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
+                reward_message = "Сюрприз дня: +1 бесплатное вращение!"
         balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()["spins"]
-    return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"message":"Ежедневный бонус начислен: +1 вращение!"}
+    return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"daily_streak":streak,"message":f"День {streak}/7: {reward_message}"}
 
 
 @app.get("/api/prizes")
@@ -287,12 +325,16 @@ async def create_invoice(payload: dict, authorization: str|None=Header(default=N
         raise HTTPException(400, "Неверный набор")
     if n not in PACKS:
         raise HTTPException(400, "Такого набора нет")
+    with db() as c:
+        user = c.execute("SELECT spin_discount_pct FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        discount_pct = int(user["spin_discount_pct"] or 0) if user else 0
+    amount = max(1, int(round(PACKS[n] * (100 - discount_pct) / 100)))
     link = await bot.create_invoice_link(
         title=f"{n} вращений рулетки",
-        description=f"Пакет из {n} вращений виртуальной рулетки",
+        description=f"Пакет из {n} вращений виртуальной рулетки" + (f" (скидка {discount_pct}%)" if discount_pct else ""),
         payload=f"spinpack:{uid}:{n}",
         currency="XTR",
-        prices=[LabeledPrice(label=f"{n} вращений", amount=PACKS[n])],
+        prices=[LabeledPrice(label=f"{n} вращений" + (f" −{discount_pct}%" if discount_pct else ""), amount=amount)],
         provider_token=""
     )
     return {"url": link}
@@ -457,7 +499,11 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
     proof=str(payload.get("proof","чек будет отправлен отдельно"))[:1500].strip()
     oid=uuid.uuid4().hex[:12]
     rub_rate=max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
-    details=json.dumps({"spins":n,"stars":PACKS[n],"rub":PACKS[n]*rub_rate,"proof":proof},ensure_ascii=False)
+    with db() as c:
+        user = c.execute("SELECT spin_discount_pct FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        discount_pct = int(user["spin_discount_pct"] or 0) if user else 0
+    final_rub = round(PACKS[n] * rub_rate * (100-discount_pct) / 100)
+    details=json.dumps({"spins":n,"stars":PACKS[n],"discount_pct":discount_pct,"rub":final_rub,"proof":proof},ensure_ascii=False)
     with db() as c:
         c.execute("INSERT INTO orders(id,telegram_id,method,status,details) VALUES(?,?,?,'pending',?)",(oid,uid,method,details))
     user_tag=f"@{payload.get('username')}" if payload.get("username") else "без username"
@@ -476,7 +522,7 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
     for admin_id in admin_ids_all():
         try:
             summary=(f"🧾 Новая заявка на оплату\nПользователь: {uid} ({user_tag})\n"
-                     f"Пакет: {n} вращений\nСумма: {PACKS[n]*RUB_PER_STAR} ₽ ({PACKS[n]} ⭐ эквивалент)\n"
+                     f"Пакет: {n} вращений\nСумма: {final_rub} ₽ ({discount_pct}% скидка; {PACKS[n]} ⭐ базовая цена)\n"
                      f"Метод: {'банковская карта' if method=='card' else 'TON'}\n"
                      f"Комментарий/чек: {proof}\nЗаявка: {oid}\n\nПроверь поступление денег перед подтверждением.")
             if receipt_path:
@@ -485,7 +531,7 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
                 await bot.send_message(admin_id, summary+"\n⚠️ Файл чека не приложен.", reply_markup=keyboard)
         except Exception as e:
             print(f"Could not notify admin {admin_id} about order {oid}: {e}")
-    return {"ok":True,"order_id":oid,"status":"pending","rub":PACKS[n]*rub_rate}
+    return {"ok":True,"order_id":oid,"status":"pending","rub":final_rub,"discount_pct":discount_pct}
 
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
@@ -964,7 +1010,7 @@ async def open_prize(cb):
                 await bot.send_video(cb.from_user.id, video_value, caption=caption)
         elif kind in {"video_note", "кружок"}:
             await bot.send_video_note(cb.from_user.id, value)
-            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
+            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n\nЕсли это бонусный кружок, перешли сообщение с кружком в личку модели @XDarryanaX.")
         elif kind in {"link", "url", "ссылка"}:
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n{value}", disable_web_page_preview=False)
         else:
