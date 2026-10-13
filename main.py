@@ -331,7 +331,7 @@ async def spin(authorization: str|None=Header(default=None)):
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
         # Each prize owns its own media. Infer pack size from the prize name.
         prize_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
-        match_count = re.search(r"(?:набор\s+из\s+)?(10|3|1)\s*(?:фото|фотограф|видео|шт)", prize_name_norm)
+        match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", prize_name_norm)
         wanted_count = int(match_count.group(1)) if match_count else 1
         valid_media = []
         for item in media_files:
