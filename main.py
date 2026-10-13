@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import re
+from datetime import datetime, timezone
 import uvicorn
 
 BASE = Path(__file__).resolve().parent
@@ -47,7 +48,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users(
           telegram_id INTEGER PRIMARY KEY, spins INTEGER NOT NULL DEFAULT 0 CHECK(spins>=0),
           points INTEGER NOT NULL DEFAULT 0 CHECK(points>=0), referred_by INTEGER,
-          referral_paid INTEGER NOT NULL DEFAULT 0, daily_claimed_at TEXT DEFAULT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+          referral_paid INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS prizes(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', image TEXT DEFAULT '',
           rarity TEXT NOT NULL DEFAULT 'Обычный', weight REAL NOT NULL DEFAULT 1,
@@ -97,9 +98,9 @@ def init_db():
         # Add/update only the built-in starter prizes. Existing user-created prizes and
         # uploaded media are preserved; this migration is safe to run on every startup.
         starter_prizes = [
-            ("photo1", "1 фото модели", "1 фото модели. После выигрыша нажми «Получить приз», чтобы открыть фото.", "", "Обычный", 50, 0, "media_group", "[]", "[]"),
-            ("photo3", "Набор из 3 фото", "3 разных фото модели. После выигрыша нажми «Получить приз», чтобы открыть фото.", "", "Обычный", 20, 0, "media_group", "[]", "[]"),
-            ("photo5", "Набор из 5 фото", "5 разных фото модели. После выигрыша нажми «Получить приз», чтобы открыть фото.", "", "Обычный", 15, 0, "media_group", "[]", "[]"),
+            ("photo1", "1 фото модели", "Одно фото из твоей коллекции. Загрузи фото в редакторе приза.", "", "Обычный", 50, 0, "media_group", "[]", "[]"),
+            ("photo3", "Набор из 3 фото", "Три разных фото модели. Добавь 3 файла в медиа приза.", "", "Обычный", 20, 0, "media_group", "[]", "[]"),
+            ("photo5", "Набор из 5 фото", "Пять фото модели.", "", "Редкий", 10, 0, "media_group", "[]", "[]"),
             ("photo10", "Набор из 10 фото", "Десять фото модели.", "", "Редкий", 5, 0, "media_group", "[]", "[]"),
             ("video1", "Видео модели", "Одно видео. Добавь видео в медиа приза или укажи Telegram file_id.", "", "Редкий", 8, 0, "video", "", "[]"),
             ("video_exclusive", "Эксклюзивное видео", "Особое видео модели.", "", "Эпический", 3, 0, "video", "", "[]"),
@@ -107,14 +108,14 @@ def init_db():
             ("private_month", "Приватный канал — 1 месяц", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 1, 0, "link", "", "[]"),
             ("private_3months", "Приватный канал — 3 месяца", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 0.5, 0, "link", "", "[]"),
             ("private_forever", "Приватный канал — навсегда", "Самый редкий приз. Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Мифический", 0.1, 0, "link", "", "[]"),
-            ("private_discount10", "Скидка 10% на приват", "Скиньте в личные сообщения @XDarryanaX скриншот этого приза, чтобы получить скидку 10% на приват.", "", "Обычный", 8, 0, "text", "", "[]"),
-            ("private_discount25", "Скидка 25% на приват", "Скиньте в личные сообщения @XDarryanaX скриншот этого приза, чтобы получить скидку 25% на приват.", "", "Редкий", 3, 0, "text", "", "[]"),
-            ("private_discount50", "Скидка 50% на приват", "Скиньте в личные сообщения @XDarryanaX скриншот этого приза, чтобы получить скидку 50% на приват.", "", "Эпический", 1, 0, "text", "", "[]"),
-            ("circle_dm", "Кружок в личные сообщения", "Вы получите персональный видеокружок в личные сообщения. Нажмите «Получить приз» в рулетке.", "", "Редкий", 3, 0, "video_note", "", "[]"),
+            ("private_discount10", "Скидка 10% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Обычный", 8, 0, "text", "", "[]"),
+            ("private_discount25", "Скидка 25% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Редкий", 3, 0, "text", "", "[]"),
+            ("private_discount50", "Скидка 50% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Эпический", 1, 0, "text", "", "[]"),
+            ("circle_dm", "Кружок в личные сообщения", "Добавь видео-кружок или file_id в медиа приза.", "", "Редкий", 3, 0, "video_note", "", "[]"),
             ("video_face", "Видео с лицом", "Добавь видео в медиа приза.", "", "Редкий", 4, 0, "video", "", "[]"),
             ("video_no_face", "Видео без лица", "Добавь видео в медиа приза.", "", "Обычный", 7, 0, "video", "", "[]"),
             ("video_pack3", "Пакет из 3 видео", "Добавь три видео в медиа приза; бот отправит их все.", "", "Эпический", 1.5, 0, "media_group", "", "[]"),
-            ("rating_member", "Оценка члена", "Пришлите в личные сообщения @XDarryanaX скриншот приза и фото для оценки, чтобы согласовать получение приза.", "", "Мифический", 0.1, 0, "text", "", "[]"),
+            ("rating_member", "Оценка члена", "Администратор укажет способ получения/инструкцию в поле выдачи.", "", "Мифический", 0.1, 0, "text", "", "[]"),
             ("bonus_spin1", "+1 дополнительное вращение", "Вращение начисляется автоматически.", "", "Обычный", 12, 1, "spins", "", "[]"),
             ("bonus_spin2", "+2 дополнительных вращения", "Вращения начисляются автоматически.", "", "Редкий", 5, 2, "spins", "", "[]"),
             ("bonus_spin3", "+3 дополнительных вращения", "Вращения начисляются автоматически.", "", "Эпический", 2, 3, "spins", "", "[]")        ]
@@ -123,11 +124,8 @@ def init_db():
         for pid in legacy_ids:
             c.execute("DELETE FROM prizes WHERE id=?", (pid,))
         for prize in starter_prizes:
-            c.execute("""INSERT INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files)
-                         VALUES(?,?,?,?,?,?,?,?,?,?)
-                         ON CONFLICT(id) DO UPDATE SET
-                           name=excluded.name, description=excluded.description,
-                           rarity=excluded.rarity, weight=excluded.weight""", prize)
+            c.execute("""INSERT OR IGNORE INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""", prize)
 
 
     with db() as c:
@@ -234,13 +232,13 @@ async def me(authorization: str|None=Header(default=None)):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
-        hist = c.execute("SELECT id AS spin_id,prize_label,rarity,image,created_at,claimed,prize_type FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 50", (uid,)).fetchall()
+        hist = c.execute("SELECT prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
     bot_info = await bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
-            "history":[{"spin_id":r["spin_id"],"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"],"claimed":bool(r["claimed"]),"prize_type":r["prize_type"]} for r in hist],
+            "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"]} for r in hist],
             "daily_claimed_at":u["daily_claimed_at"],
             "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
 
@@ -257,19 +255,21 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
         if last:
             try:
                 last_dt = datetime.fromisoformat(last)
-                if last_dt.tzinfo is None: last_dt = last_dt.replace(tzinfo=timezone.utc)
-                remaining = 86400 - int((now-last_dt).total_seconds())
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                remaining = 86400 - int((now - last_dt.astimezone(timezone.utc)).total_seconds())
                 if remaining > 0:
                     hours, rem = divmod(remaining, 3600)
                     minutes = rem // 60
                     raise HTTPException(409, f"Ежедневный бонус уже получен. Следующий через {hours} ч. {minutes} мин.")
             except HTTPException:
                 raise
-            except Exception:
+            except (ValueError, TypeError, OverflowError):
                 pass
         c.execute("UPDATE users SET spins=spins+1,daily_claimed_at=? WHERE telegram_id=?", (now_iso, uid))
         balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()["spins"]
     return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"message":"Ежедневный бонус начислен: +1 вращение!"}
+
 
 @app.get("/api/prizes")
 async def prizes():
@@ -352,18 +352,14 @@ async def spin(authorization: str|None=Header(default=None)):
             if n < acc:
                 chosen = r
                 break
-        bonus_spins = 0
         if chosen["prize_type"] == "spins":
             bonus_spins = max(0, int(chosen["points"] or 0))
-            if admin_free:
-                c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
-            else:
-                c.execute("UPDATE users SET spins=spins-1+? WHERE telegram_id=?", (bonus_spins,uid))
+            c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
         elif admin_free:
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
-        delivery_payload = "" if chosen["prize_type"] == "spins" else (chosen["delivery_value"] or "").strip()
+        delivery_payload = (chosen["delivery_value"] or "").strip()
         # A category is inferred on the server too, so prize delivery does not depend
         # on the admin page having sent the hidden category field correctly.
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
@@ -399,30 +395,18 @@ async def spin(authorization: str|None=Header(default=None)):
         spin_id = spin_cursor.lastrowid
     # Notify all configured admins about every win (including wins by admins).
     try:
-        username = ""
-        try:
-            if authorization and authorization.startswith("tma "):
-                telegram_user = validate_init_data(authorization[4:])
-                username = str(telegram_user.get("username") or "").strip()
-        except Exception:
-            username = ""
-        user_label = f"@{username}" if username else "username не указан"
+        with db() as c:
+            winner=c.execute("SELECT telegram_id FROM users WHERE telegram_id=?",(uid,)).fetchone()
+        uname=""
+        # username is supplied by Telegram WebApp initData, stored from the validated user payload when possible.
         for admin_id in admin_ids_all():
             try:
-                await bot.send_message(
-                    admin_id,
-                    f"🎉 ВЫИГРЫШ В РУЛЕТКЕ!\n\n👤 Пользователь: {user_label}\n"
-                    f"Имя: {str(telegram_user.get('first_name', '') if 'telegram_user' in locals() else '')}\n"
-                    f"ID: {uid}\n\n🎁 Приз: {chosen['name']}\n"
-                    f"✨ Редкость: {chosen['rarity']}"
-                )
-            except Exception as e:
-                print(f"Could not notify admin {admin_id} about prize win: {e}")
+                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\nПользователь: {uid}\nПриз: {chosen['name']}\nРедкость: {chosen['rarity']}\nID приза: {chosen['id']}")
+            except Exception: pass
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"spin_id":spin_id,"rarity":chosen["rarity"],"image":chosen["image"],
-            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable,
-            "prize_type":chosen["prize_type"],"bonus_spins":bonus_spins}
+            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
 
 @app.post("/api/claim-prize")
 async def api_claim_prize(payload: dict, authorization: str|None=Header(default=None)):
@@ -611,8 +595,8 @@ async def upload_image(file: UploadFile=File(...), authorization: str|None=Heade
 @app.post("/api/admin/upload-media")
 async def upload_media(files: list[UploadFile]=File(...), authorization: str|None=Header(default=None)):
     uid = require_admin(authorization)
-    if not files or len(files) > 50:
-        raise HTTPException(400, "Выбери от 1 до 50 фото или видео")
+    if not files or len(files) > 20:
+        raise HTTPException(400, "Выбери от 1 до 20 фото или видео")
     allowed = {"image/jpeg":".jpg", "image/png":".png", "image/webp":".webp", "image/gif":".gif",
                "video/mp4":".mp4", "video/webm":".webm", "video/quicktime":".mov"}
     folder = BASE/"uploads"; folder.mkdir(exist_ok=True)
@@ -622,8 +606,8 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
         if not ext:
             raise HTTPException(400, f"Не поддерживается файл {file.filename}. Используй JPG, PNG, WEBP, GIF, MP4, WEBM или MOV.")
         data=await file.read()
-        if not data or len(data)>50*1024*1024:
-            raise HTTPException(413, "Каждый файл должен быть не больше 50 МБ")
+        if not data or len(data)>20*1024*1024:
+            raise HTTPException(413, "Каждый файл должен быть не больше 20 МБ")
         name=uuid.uuid4().hex+ext
         (folder/name).write_bytes(data)
         results.append({"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
@@ -656,7 +640,7 @@ async def upload_media_pool(category: str, files: list[UploadFile]=File(...), au
         if category!="photo" and not ct.startswith("video/"):
             raise HTTPException(400,"В разделы видео загружай только видео")
         data=await file.read()
-        if not data or len(data)>50*1024*1024: raise HTTPException(413,"Каждый файл должен быть не больше 50 МБ")
+        if not data or len(data)>20*1024*1024: raise HTTPException(413,"Каждый файл должен быть не больше 20 МБ")
         name=uuid.uuid4().hex+ext; (folder/name).write_bytes(data)
         url=WEBAPP_URL.rstrip("/")+"/uploads/"+name
         mt="photo" if ct.startswith("image/") else "video"
