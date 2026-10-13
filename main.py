@@ -360,7 +360,7 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
                 delivery = dict(circle)
                 reward_message = "🎥 Ежедневный приз — кружок. Перешли сообщение с кружком из чата бота в личку модели @XDarryanaX."
             else:
-                c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=MAX(0,daily_streak-1) WHERE telegram_id=?", (uid,))
+                c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=CASE WHEN daily_streak > 0 THEN daily_streak-1 ELSE 0 END WHERE telegram_id=?", (uid,))
                 raise HTTPException(503, "Ежедневный кружок пока не настроен. Попробуй позже.")
         elif streak == 4:
             c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
@@ -489,7 +489,7 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
         try:
             with db() as c:
                 if streak == 3:
-                    c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=MAX(0,daily_streak-1) WHERE telegram_id=? AND daily_claimed_at=?", (uid, now_iso))
+                    c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=CASE WHEN daily_streak > 0 THEN daily_streak-1 ELSE 0 END WHERE telegram_id=? AND daily_claimed_at=?", (uid, now_iso))
                 elif streak == 7 and delivery:
                     c.execute("UPDATE spins SET claimed=0 WHERE id=(SELECT id FROM spins WHERE telegram_id=? AND prize_id=? ORDER BY id DESC LIMIT 1)", (uid, delivery.get("id")))
         except Exception as rollback_exc:
@@ -1142,8 +1142,8 @@ async def claim_prize_for_user(uid: int, spin_id: int):
         if not value or value in {"[]", "{}", "null"}:
             return False, "Для этого приза не настроено содержимое"
         c.execute("UPDATE spins SET delivery_value=? WHERE id=? AND telegram_id=?", (value, spin_id, uid))
-        c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=0", (spin_id, uid))
-        if c.execute("SELECT changes() n").fetchone()["n"] != 1:
+        claim_update = c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=0", (spin_id, uid))
+        if claim_update.rowcount != 1:
             return False, "Этот приз уже обработан"
         label = row["prize_label"]
     try:
@@ -1208,8 +1208,8 @@ async def open_prize(cb):
         if not value:
             await cb.answer("У этого приза не настроено содержимое", show_alert=True)
             return
-        c.execute("UPDATE spins SET claimed=2 WHERE id=? AND telegram_id=? AND claimed=1", (spin_id, cb.from_user.id))
-        if c.execute("SELECT changes() n").fetchone()["n"] != 1:
+        open_update = c.execute("UPDATE spins SET claimed=2 WHERE id=? AND telegram_id=? AND claimed=1", (spin_id, cb.from_user.id))
+        if open_update.rowcount != 1:
             await cb.answer("Этот приз уже открыт", show_alert=True)
             return
     try:
