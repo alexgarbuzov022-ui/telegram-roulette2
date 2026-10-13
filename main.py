@@ -1,4 +1,4 @@
-import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid
+import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -19,7 +19,17 @@ load_dotenv(BASE / ".env")
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://telegram-roulette2.onrender.com").strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = BASE / os.getenv("DB_PATH", "roulette.sqlite3")
+USE_POSTGRES = bool(DATABASE_URL)
+if os.getenv("RENDER") and not DATABASE_URL:
+    raise SystemExit("DATABASE_URL is required on Render to avoid losing data to ephemeral SQLite storage.")
+if USE_POSTGRES:
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except ImportError as exc:
+        raise SystemExit("DATABASE_URL is set but psycopg is missing. Add psycopg[binary] to requirements.txt.") from exc
 PRICE = int(os.getenv("SPIN_PRICE_STARS", "50"))
 app = FastAPI(title="Telegram Prize Roulette")
 bot = Bot(TOKEN) if TOKEN else None
@@ -28,12 +38,57 @@ dp = Dispatcher()
 if not TOKEN:
     raise SystemExit("Set BOT_TOKEN in Render Environment.")
 
+class PgCursor:
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+        self.rowcount = cursor.rowcount
+    def fetchone(self): return self._cursor.fetchone()
+    def fetchall(self): return self._cursor.fetchall()
+
+class PgConnection:
+    def __init__(self, conn): self._conn = conn
+    def execute(self, sql, params=()):
+        q = sql.strip()
+        if q.upper() == "PRAGMA FOREIGN_KEYS=ON":
+            return PgCursor(self._conn.execute("SELECT 1"))
+        m = re.fullmatch(r"PRAGMA\s+table_info\((\w+)\)", q, re.I)
+        if m:
+            cur = self._conn.execute("SELECT column_name AS name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=%s ORDER BY ordinal_position", (m.group(1).lower(),))
+            return PgCursor(cur)
+        q = re.sub(r"\bBEGIN\s+IMMEDIATE\b", "BEGIN", q, flags=re.I)
+        ignore = bool(re.match(r"INSERT\s+OR\s+IGNORE\s+INTO\b", q, re.I))
+        if ignore:
+            q = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", q, count=1, flags=re.I)
+            if not re.search(r"\bON\s+CONFLICT\b", q, re.I):
+                q = q.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+        q = re.sub(r"\bid\s+INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", "id BIGSERIAL PRIMARY KEY", q, flags=re.I)
+        q = q.replace("?", "%s")
+        track_id = bool(re.match(r"\s*INSERT\s+INTO\s+(spins|media_library)\b", q, re.I))
+        if track_id and " RETURNING " not in q.upper():
+            cur = self._conn.execute(q.rstrip().rstrip(";") + " RETURNING id", params)
+            row = cur.fetchone()
+            return PgCursor(cur, row["id"] if row else None)
+        return PgCursor(self._conn.execute(q, params))
+    def executescript(self, script):
+        result = None
+        for statement in script.split(";"):
+            if statement.strip(): result = self.execute(statement)
+        return result
+    def commit(self): self._conn.commit()
+    def rollback(self): self._conn.rollback()
+    def close(self): self._conn.close()
+
 @contextmanager
 def db():
-    c = sqlite3.connect(DB_PATH, timeout=20)
-    c.row_factory = sqlite3.Row
-    try:
+    if USE_POSTGRES:
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+        c = PgConnection(conn)
+    else:
+        c = sqlite3.connect(DB_PATH, timeout=20)
+        c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys=ON")
+    try:
         yield c
         c.commit()
     except Exception:
@@ -41,6 +96,16 @@ def db():
         raise
     finally:
         c.close()
+
+
+
+def add_column_if_missing(c, table, column, definition):
+    if USE_POSTGRES:
+        exists = c.execute("SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?", (table, column)).fetchone()
+    else:
+        exists = column in {r["name"] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    if not exists:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 def init_db():
     with db() as c:
@@ -73,29 +138,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS deleted_prizes(id INTEGER PRIMARY KEY AUTOINCREMENT, prize_json TEXT NOT NULL, deleted_by INTEGER, deleted_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
         # Migrate existing installations without deleting user data.
-        user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
-        if "daily_claimed_at" not in user_cols:
-            c.execute("ALTER TABLE users ADD COLUMN daily_claimed_at TEXT DEFAULT NULL")
-        if "daily_streak" not in user_cols:
-            c.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER NOT NULL DEFAULT 0")
-        if "spin_discount_pct" not in user_cols:
-            c.execute("ALTER TABLE users ADD COLUMN spin_discount_pct INTEGER NOT NULL DEFAULT 0")
-        if "spin_discount_expires_at" not in user_cols:
-            c.execute("ALTER TABLE users ADD COLUMN spin_discount_expires_at TEXT DEFAULT NULL")
-        if "private_discount_pct" not in user_cols:
-            c.execute("ALTER TABLE users ADD COLUMN private_discount_pct INTEGER NOT NULL DEFAULT 0")
-        spin_cols = {r["name"] for r in c.execute("PRAGMA table_info(spins)").fetchall()}
-        if "prize_type" not in spin_cols:
-            c.execute("ALTER TABLE spins ADD COLUMN prize_type TEXT NOT NULL DEFAULT 'points'")
-        if "delivery_value" not in spin_cols:
-            c.execute("ALTER TABLE spins ADD COLUMN delivery_value TEXT DEFAULT ''")
-        if "claimed" not in spin_cols:
-            c.execute("ALTER TABLE spins ADD COLUMN claimed INTEGER NOT NULL DEFAULT 0")
-        prize_cols = {r["name"] for r in c.execute("PRAGMA table_info(prizes)").fetchall()}
-        if "media_files" not in prize_cols:
-            c.execute("ALTER TABLE prizes ADD COLUMN media_files TEXT NOT NULL DEFAULT '[]'")
-        if "media_pool" not in prize_cols:
-            c.execute("ALTER TABLE prizes ADD COLUMN media_pool TEXT NOT NULL DEFAULT ''")
+        add_column_if_missing(c, "users", "daily_claimed_at", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "daily_streak", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(c, "users", "spin_discount_pct", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(c, "users", "spin_discount_expires_at", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "private_discount_pct", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(c, "spins", "prize_type", "TEXT NOT NULL DEFAULT 'points'")
+        add_column_if_missing(c, "spins", "delivery_value", "TEXT DEFAULT ''")
+        add_column_if_missing(c, "spins", "claimed", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(c, "prizes", "media_files", "TEXT NOT NULL DEFAULT '[]'")
+        add_column_if_missing(c, "prizes", "media_pool", "TEXT NOT NULL DEFAULT ''")
         c.execute("""CREATE TABLE IF NOT EXISTS media_library(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             category TEXT NOT NULL,
@@ -267,7 +319,11 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
     reward_message = ""
     delivery = None
     with db() as c:
-        c.execute("BEGIN IMMEDIATE")
+        if USE_POSTGRES:
+            c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+            c.execute("SELECT telegram_id FROM users WHERE telegram_id=? FOR UPDATE", (uid,))
+        else:
+            c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         user = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
         last = user["daily_claimed_at"]
@@ -483,7 +539,11 @@ async def spin(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
     admin_free = is_admin(uid)
     with db() as c:
-        c.execute("BEGIN IMMEDIATE")
+        if USE_POSTGRES:
+            c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+            c.execute("SELECT telegram_id FROM users WHERE telegram_id=? FOR UPDATE", (uid,))
+        else:
+            c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()
         if not admin_free and (not u or u["spins"] < 1):
