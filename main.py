@@ -245,7 +245,7 @@ async def me(authorization: str|None=Header(default=None)):
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     return {"telegram_id":uid,"spins":u["spins"],"points":u["points"],"spin_price_stars":PRICE,
             "history":[{"prize":r["prize_label"],"rarity":r["rarity"],"image":r["image"],"at":r["created_at"],"prize_type":r["prize_type"],"claimed":r["claimed"]} for r in hist],
-            "daily_claimed_at":u["daily_claimed_at"],"daily_streak":u["daily_streak"],"spin_discount_pct":u["spin_discount_pct"],"private_discount_pct":u["private_discount_pct"],
+            "daily_claimed_at":u["daily_claimed_at"],"daily_streak":u["daily_streak"],"daily_next_day":(int(u["daily_streak"] or 0)%7)+1,"spin_discount_pct":u["spin_discount_pct"],"private_discount_pct":u["private_discount_pct"],
             "payments":[dict(r) for r in pays],"referrals":referrals,"referral_link":referral_link,"is_admin":is_admin(uid)}
 
 @app.post("/api/daily-bonus")
@@ -254,6 +254,7 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
     reward_message = ""
+    delivery = None
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
@@ -268,7 +269,6 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
                 if remaining > 0:
                     hours, rem = divmod(remaining, 3600)
                     raise HTTPException(409, f"Бонус уже получен. Следующий через {hours} ч. {rem//60} мин.")
-                # Keep the chain if the next claim is within 48 hours; otherwise restart.
                 streak = (int(user["daily_streak"] or 0) % 7 + 1) if elapsed <= 172800 else 1
             except HTTPException: raise
             except (ValueError, TypeError, OverflowError): streak = 1
@@ -281,33 +281,87 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET private_discount_pct=10 WHERE telegram_id=?", (uid,))
             reward_message = "Скидка 10% на приват получена. Покажи это сообщение при оформлении привата."
         elif streak == 3:
-            # Use an admin-configured circle prize if one exists; never fabricate media.
             circle = c.execute("SELECT * FROM prizes WHERE enabled=1 AND lower(prize_type) IN ('video_note','кружок') AND (delivery_value<>'' OR media_files<>'[]') ORDER BY RANDOM() LIMIT 1").fetchone()
             if circle:
-                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,0)", (uid,circle['id'],circle['name'],circle['rarity'],circle['image'],circle['prize_type'],circle['delivery_value']))
-                reward_message = "Кружок добавлен в «Мои призы». Забери его и перешли сообщение в личку модели @XDarryanaX."
+                value = circle['delivery_value'] or ''
+                try:
+                    payload=json.loads(value)
+                    if isinstance(payload,dict) and payload.get('media_files'):
+                        first=payload['media_files'][0]
+                        value=first.get('url') or first.get('file_id') or value
+                except Exception: pass
+                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,2)", (uid,circle['id'],circle['name'],circle['rarity'],circle['image'],circle['prize_type'],value))
+                delivery = dict(circle)
+                reward_message = "🎥 Твой ежедневный приз — кружок! Перешли это сообщение в личку модели @XDarryanaX."
             else:
-                reward_message = "Бонус дня: кружок в личку! Пока в админ-панели не загружен кружок — напиши администратору @XDarryanaX, чтобы получить его."
+                reward_message = "Кружок пока не настроен администратором. Этот день всё равно засчитан; напиши @XDarryanaX."
         elif streak == 4:
             c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
-            reward_message = "Одно бесплатное вращение начислено!"
+            reward_message = "🎰 Одно бесплатное вращение начислено!"
         elif streak == 5:
             c.execute("UPDATE users SET spins=spins+2 WHERE telegram_id=?", (uid,))
-            reward_message = "+2 бесплатных вращения начислены!"
+            reward_message = "🎰 +2 бесплатных вращения начислены!"
         elif streak == 6:
             c.execute("UPDATE users SET private_discount_pct=25 WHERE telegram_id=?", (uid,))
-            reward_message = "Скидка 25% на приват получена. Покажи это сообщение при оформлении привата."
+            reward_message = "🏷️ Скидка 25% на приват получена. Покажи это сообщение при оформлении привата."
         else:
             prize = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0 ORDER BY RANDOM() LIMIT 1").fetchone()
             if prize:
-                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,0)", (uid,prize['id'],prize['name'],prize['rarity'],prize['image'],prize['prize_type'],prize['delivery_value']))
-                reward_message = f"Сюрприз дня: «{prize['name']}» добавлен в «Мои призы»!"
+                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,2)", (uid,prize['id'],prize['name'],prize['rarity'],prize['image'],prize['prize_type'],prize['delivery_value']))
+                delivery = dict(prize)
+                reward_message = f"🎁 Сюрприз дня: {prize['name']}! Приз отправлен в этот чат."
             else:
                 c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
-                reward_message = "Сюрприз дня: +1 бесплатное вращение!"
+                reward_message = "🎰 Сюрприз дня: +1 бесплатное вращение!"
         balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()["spins"]
+    # Daily rewards are delivered to the user's bot chat, not only shown in the Mini App.
+    try:
+        if streak == 3 and delivery:
+            value = (delivery.get('delivery_value') or '').strip()
+            kind = (delivery.get('prize_type') or '').lower()
+            if value:
+                try:
+                    payload=json.loads(value)
+                    if isinstance(payload,dict) and payload.get('media_files'):
+                        media=payload['media_files']
+                        note=next((x.get('url') or x.get('file_id') for x in media if isinstance(x,dict) and x.get('type') in ('video_note','кружок')),None)
+                        value=note or value
+                except Exception: pass
+                await bot.send_video_note(uid, value)
+            await bot.send_message(uid, "🎁 Ежедневный бонус: кружок! Перешли это сообщение в личку модели @XDarryanaX.")
+        elif streak == 7 and delivery:
+            value=(delivery.get('delivery_value') or '').strip()
+            kind=(delivery.get('prize_type') or 'text').lower()
+            payload=None
+            try:
+                parsed=json.loads(value)
+                if isinstance(parsed,dict) and isinstance(parsed.get('media_files'),list): payload=parsed['media_files']
+            except Exception: pass
+            if payload:
+                photos=[x.get('url') or x.get('file_id') for x in payload if isinstance(x,dict) and x.get('type') in ('photo','image') and (x.get('url') or x.get('file_id'))]
+                videos=[x.get('url') or x.get('file_id') for x in payload if isinstance(x,dict) and x.get('type')=='video' and (x.get('url') or x.get('file_id'))]
+                for p in photos:
+                    await bot.send_photo(uid,p,caption=f"🎁 Ежедневный приз: {delivery['name']}")
+                for v in videos:
+                    await bot.send_video(uid,v,caption=f"🎁 Ежедневный приз: {delivery['name']}")
+                if not photos and not videos: await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value}")
+            elif kind in ('photo','image','картинка','фото') and value:
+                await bot.send_photo(uid,value,caption=f"🎁 Ежедневный приз: {delivery['name']}")
+            elif kind in ('video','видео') and value:
+                await bot.send_video(uid,value,caption=f"🎁 Ежедневный приз: {delivery['name']}")
+            elif kind in ('video_note','кружок') and value:
+                await bot.send_video_note(uid,value)
+                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\nПерешли кружок в личку модели @XDarryanaX.")
+            elif kind in ('link','url','ссылка'):
+                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value}")
+            else:
+                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value or delivery.get('description') or 'Обратись к администратору для получения содержимого приза.'}")
+        else:
+            await bot.send_message(uid, f"🎁 Ежедневный бонус · День {streak}/7\n\n{reward_message}")
+    except Exception as exc:
+        # The bonus stays credited; surface a clear message in Mini App if bot delivery fails.
+        reward_message += "\n⚠️ Не получилось отправить сообщение в чат бота. Открой бота и нажми /start."
     return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"daily_streak":streak,"message":f"День {streak}/7: {reward_message}"}
-
 
 @app.get("/api/prizes")
 async def prizes():
