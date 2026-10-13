@@ -343,20 +343,22 @@ async def spin(authorization: str|None=Header(default=None)):
             if media_type in {"photo", "video"}:
                 valid_media.append({"url": str(item["url"]).strip(), "type": media_type})
         if valid_media:
-            # Prefer matching media kind based on prize name and select without replacement.
+            # Select exactly the pack size, without duplicates. Never silently deliver a smaller pack.
             wants_video = "видео" in prize_name_norm or "video" in prize_name_norm
             matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
             if matching:
                 valid_media = matching
-            wanted_count = min(wanted_count, len(valid_media))
+            if len(valid_media) < wanted_count:
+                raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {wanted_count} файлов, прикреплено {len(valid_media)} подходящих.")
             valid_media = secrets.SystemRandom().sample(valid_media, wanted_count)
             delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
         elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
             delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
             delivery_payload = ""
-        c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
+        spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
                   (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+        spin_id = spin_cursor.lastrowid
     # Notify all configured admins about every win (including wins by admins).
     try:
         with db() as c:
@@ -369,8 +371,25 @@ async def spin(authorization: str|None=Header(default=None)):
             except Exception: pass
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
-    return {"prize":chosen["name"],"prize_id":chosen["id"],"rarity":chosen["rarity"],"image":chosen["image"],
+    return {"prize":chosen["name"],"prize_id":chosen["id"],"spin_id":spin_id,"rarity":chosen["rarity"],"image":chosen["image"],
             "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
+
+@app.post("/api/claim-prize")
+async def api_claim_prize(payload: dict, authorization: str|None=Header(default=None)):
+    uid = uid_from_header(authorization)
+    try:
+        spin_id = int(payload.get("spin_id", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Некорректный ID приза")
+    if spin_id <= 0:
+        raise HTTPException(400, "Некорректный ID приза")
+    try:
+        ok, message = await claim_prize_for_user(uid, spin_id)
+    except Exception:
+        raise HTTPException(502, "Не удалось отправить уведомление в Telegram. Попробуй ещё раз.")
+    if not ok:
+        raise HTTPException(400, message)
+    return {"ok": True, "message": message}
 
 @app.get("/api/payment-options")
 async def payment_options(authorization: str|None=Header(default=None)):
@@ -736,61 +755,140 @@ async def my_prizes_callback(cb):
 
 async def send_my_prizes(chat_id: int, uid: int):
     with db() as c:
-        rows=c.execute("SELECT id,prize_label,rarity,image,created_at FROM spins WHERE telegram_id=? AND claimed=0 ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
+        rows=c.execute("SELECT id,prize_label,rarity,image,created_at,claimed FROM spins WHERE telegram_id=? AND claimed IN (0,1) ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
     if not rows:
-        await bot.send_message(chat_id,"🎁 Пока нет призов, которые можно получить. Когда выиграешь приз с выдачей, он появится здесь.",reply_markup=reply_menu())
+        await bot.send_message(chat_id,"🎁 Пока нет призов, ожидающих открытия. Когда выиграешь приз в рулетке, он появится здесь.",reply_markup=reply_menu())
         return
-    await bot.send_message(chat_id,"🎁 Твои призы к получению. Нажми кнопку под нужным призом:",reply_markup=reply_menu())
+    await bot.send_message(chat_id,"🎁 Твои призы. Нажми кнопку под нужным призом:",reply_markup=reply_menu())
     for r in rows:
-        # Do not reveal the prize name, rarity, or preview before the user claims it.
-        await bot.send_message(
-            chat_id,
-            "🎁 У тебя есть неоткрытый приз!\nНажми «Получить приз», чтобы открыть его.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🎁 Получить приз", callback_data=f"claim:{r['id']}")
-            ]])
-        )
+        if int(r["claimed"] or 0) == 1:
+            text = f"🎉 Новый приз!\n{r['prize_label']}\n\nНажми «Открыть приз», чтобы получить содержимое."
+            button = InlineKeyboardButton(text="🎁 Открыть приз", callback_data=f"openprize:{r['id']}")
+        else:
+            text = "🎁 У тебя есть выигранный приз!\nНажми «Получить приз», чтобы подтвердить его и открыть доступ."
+            button = InlineKeyboardButton(text="🎁 Получить приз", callback_data=f"claim:{r['id']}")
+        await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]))
+
+async def claim_prize_for_user(uid: int, spin_id: int):
+    """Move a won prize to the unopened state and notify the user once."""
+    with db() as c:
+        row = c.execute("SELECT * FROM spins WHERE id=? AND telegram_id=?", (spin_id, uid)).fetchone()
+        if not row:
+            return False, "Приз не найден"
+        if int(row["claimed"] or 0) == 1:
+            return False, "Этот приз уже ожидает открытия"
+        if int(row["claimed"] or 0) >= 2:
+            return False, "Этот приз уже открыт"
+        value = str(row["delivery_value"] or "").strip()
+        if not value:
+            # Backward-compatible recovery for older wins created before media was
+            # copied into each spin row. Prefer the media attached to that exact prize.
+            prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
+            if prize:
+                value = str(prize["delivery_value"] or "").strip()
+                prize_media = []
+                try:
+                    prize_media = json.loads(prize["media_files"] or "[]")
+                except (ValueError, TypeError):
+                    prize_media = []
+                if not value and isinstance(prize_media, list) and prize_media:
+                    name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
+                    match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", name_norm)
+                    wanted = int(match_count.group(1)) if match_count else 1
+                    kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
+                    valid = [x for x in prize_media if isinstance(x, dict) and x.get("url") and x.get("type") in {"photo", "image", "video"}]
+                    matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+                    if matching:
+                        valid = matching
+                    if valid:
+                        value = json.dumps({"media_files": secrets.SystemRandom().sample(valid, min(wanted, len(valid)))}, ensure_ascii=False)
+                if not value and str(prize["image"] or "").strip():
+                    value = json.dumps({"media_files":[{"url":str(prize["image"]).strip(),"type":"photo"}]}, ensure_ascii=False)
+                if not value:
+                    pool = str(prize["media_pool"] or "").strip()
+                    name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
+                    if not pool:
+                        if any(k in name_norm for k in ("видео с лицом", "video face", "видео без лица", "video noface")):
+                            pool = "video_face" if "лицом" in name_norm or "face" in name_norm else "video_noface"
+                        elif any(k in name_norm for k in ("фото", "фотограф", "photo", "picture")):
+                            pool = "photo"
+                    if pool:
+                        media_row = c.execute("SELECT url,media_type FROM media_library WHERE category=? ORDER BY RANDOM() LIMIT 1", (pool,)).fetchone()
+                        if media_row:
+                            value = json.dumps({"media_files":[{"url":media_row["url"],"type":media_row["media_type"]}]}, ensure_ascii=False)
+            if not value or value in {"[]", "{}", "null"}:
+                return False, "Для этого приза не настроено содержимое"
+            c.execute("UPDATE spins SET delivery_value=? WHERE id=? AND telegram_id=?", (value, spin_id, uid))
+        c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=0", (spin_id, uid))
+        if c.execute("SELECT changes() n").fetchone()["n"] != 1:
+            return False, "Этот приз уже обработан"
+        label = row["prize_label"]
+    try:
+        await bot.send_message(uid, f"🎉 Новый приз!\n{label}\n\nОткрыть:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🎁 Открыть приз", callback_data=f"openprize:{spin_id}")
+        ]]))
+    except Exception:
+        with db() as c:
+            c.execute("UPDATE spins SET claimed=0 WHERE id=? AND telegram_id=? AND claimed=1", (spin_id, uid))
+        raise
+    return True, "Отправил уведомление о новом призе!"
 
 @dp.callback_query(F.data.startswith("claim:"))
 async def claim_prize(cb):
-    try: spin_id=int(cb.data.split(":",1)[1])
+    try:
+        spin_id = int(cb.data.split(":", 1)[1])
+        ok, message = await claim_prize_for_user(cb.from_user.id, spin_id)
+        if ok:
+            try:
+                await cb.message.edit_text("✅ Приз получен! Я отправил отдельное уведомление — нажми там «🎁 Открыть приз».")
+            except Exception:
+                pass
+        await cb.answer(message, show_alert=not ok)
     except Exception:
-        await cb.answer("Неверный приз",show_alert=True); return
+        await cb.answer("Не удалось получить приз. Попробуй ещё раз.", show_alert=True)
+
+@dp.message(F.web_app_data)
+async def webapp_prize_claim(m: Message):
+    """Handle the Mini App's explicit 'Получить приз' confirmation."""
+    try:
+        payload = json.loads(m.web_app_data.data or "{}")
+        if payload.get("action") != "claim_prize":
+            return
+        spin_id = int(payload.get("spin_id", 0))
+        ok, message = await claim_prize_for_user(m.from_user.id, spin_id)
+        if not ok and message != "Этот приз уже ожидает открытия":
+            await m.answer(message)
+    except Exception:
+        await m.answer("Не удалось подтвердить приз. Открой «🎁 Мои призы» и попробуй ещё раз.")
+
+@dp.callback_query(F.data.startswith("openprize:"))
+async def open_prize(cb):
+    try:
+        spin_id = int(cb.data.split(":", 1)[1])
+    except Exception:
+        await cb.answer("Неверный приз", show_alert=True)
+        return
+    # Reserve the prize before sending so repeated taps cannot deliver it twice.
     with db() as c:
-        row=c.execute("SELECT * FROM spins WHERE id=? AND telegram_id=?",(spin_id,cb.from_user.id)).fetchone()
+        row = c.execute("SELECT * FROM spins WHERE id=? AND telegram_id=?", (spin_id, cb.from_user.id)).fetchone()
         if not row:
-            await cb.answer("Приз не найден",show_alert=True); return
-        if row["claimed"]:
-            await cb.answer("Этот приз уже получен",show_alert=True); return
-        value=(row["delivery_value"] or "").strip()
-        kind=(row["prize_type"] or "text").lower()
-        # Backfill old wins: if their stored value is empty/[]/null, infer the media
-        # category from the current prize name and pick one item from the library.
-        if value in {"", "[]", "{}", "null"}:
-            prize = c.execute("SELECT name,media_pool,image,delivery_value FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
-            pool = str(prize["media_pool"] or "") if prize and "media_pool" in prize.keys() else ""
-            if not pool and prize:
-                pname = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
-                if any(k in pname for k in ("видео с лицом", "видео с_лицом", "video face", "face video")):
-                    pool = "video_face"
-                elif any(k in pname for k in ("видео без лица", "видео без_лица", "video noface", "faceless")):
-                    pool = "video_noface"
-                elif any(k in pname for k in ("фото", "фотограф", "photo", "picture", "картинка")):
-                    pool = "photo"
-            if pool:
-                media_row = c.execute("SELECT url,media_type FROM media_library WHERE category=? ORDER BY RANDOM() LIMIT 1", (pool,)).fetchone()
-                if media_row:
-                    value = json.dumps({"media_files":[{"url":media_row["url"],"type":media_row["media_type"]}]}, ensure_ascii=False)
-            if value in {"", "[]", "{}", "null"} and prize:
-                value = str(prize["delivery_value"] or "").strip()
-                if value in {"[]", "{}", "null"}: value = ""
-                if not value and str(prize["image"] or "").strip():
-                    value = json.dumps({"media_files":[{"url":str(prize["image"]).strip(),"type":"photo"}]}, ensure_ascii=False)
+            await cb.answer("Приз не найден", show_alert=True)
+            return
+        if int(row["claimed"] or 0) == 2:
+            await cb.answer("Этот приз уже открыт", show_alert=True)
+            return
+        if int(row["claimed"] or 0) != 1:
+            await cb.answer("Сначала нажми «Получить приз»", show_alert=True)
+            return
+        value = (row["delivery_value"] or "").strip()
+        kind = (row["prize_type"] or "text").lower()
         if not value:
-            await cb.answer("В категории нет медиа. Проверь библиотеку и название приза.",show_alert=True); return
-        c.execute("UPDATE spins SET claimed=1 WHERE id=? AND claimed=0",(spin_id,))
+            await cb.answer("У этого приза не настроено содержимое", show_alert=True)
+            return
+        c.execute("UPDATE spins SET claimed=2 WHERE id=? AND telegram_id=? AND claimed=1", (spin_id, cb.from_user.id))
         if c.execute("SELECT changes() n").fetchone()["n"] != 1:
-            await cb.answer("Этот приз уже получен",show_alert=True); return
+            await cb.answer("Этот приз уже открыт", show_alert=True)
+            return
     try:
         media_payload = None
         try:
@@ -800,43 +898,47 @@ async def claim_prize(cb):
         except (ValueError, TypeError):
             pass
         if media_payload:
-            photos = [x["url"] for x in media_payload if x.get("type") == "photo" and x.get("url")]
-            videos = [x["url"] for x in media_payload if x.get("type") == "video" and x.get("url")]
-            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
-            # Telegram media groups accept up to 10 items; send larger collections in batches.
+            photos = [x["url"] for x in media_payload if isinstance(x, dict) and x.get("type") in {"photo", "image"} and x.get("url")]
+            videos = [x["url"] for x in media_payload if isinstance(x, dict) and x.get("type") == "video" and x.get("url")]
+            if not photos and not videos:
+                raise ValueError("В призе нет файлов для отправки")
             for start in range(0, len(photos), 10):
                 batch = photos[start:start+10]
                 if len(batch) == 1:
                     await bot.send_photo(cb.from_user.id, batch[0], caption=f"📸 {row['prize_label']}")
                 else:
-                    media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i,url in enumerate(batch)]
+                    media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i, url in enumerate(batch)]
                     await bot.send_media_group(cb.from_user.id, media)
             for url in videos:
                 await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
-        elif kind in {"photo","image","картинка","фото"}:
-            await bot.send_photo(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
-        elif kind in {"video","видео"}:
-            await bot.send_video(cb.from_user.id,value,caption=f"🎉 Твой приз: {row['prize_label']}")
-        elif kind in {"video_note","кружок"}:
-            await bot.send_video_note(cb.from_user.id,value)
+            if not photos and videos:
+                # The first video already carries the prize caption.
+                pass
+            elif photos and videos:
+                await bot.send_message(cb.from_user.id, f"🎉 Приз открыт: {row['prize_label']}")
+        elif kind in {"photo", "image", "картинка", "фото"}:
+            await bot.send_photo(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
+        elif kind in {"video", "видео"}:
+            await bot.send_video(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
+        elif kind in {"video_note", "кружок"}:
+            await bot.send_video_note(cb.from_user.id, value)
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}")
-        elif kind in {"link","url","ссылка"}:
-            await bot.send_message(cb.from_user.id,f"🎉 Твой приз: {row['prize_label']}\n{value}",disable_web_page_preview=False)
+        elif kind in {"link", "url", "ссылка"}:
+            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n{value}", disable_web_page_preview=False)
         else:
-            await bot.send_message(cb.from_user.id,f"🎉 Твой приз: {row['prize_label']}\n\n{value}")
+            await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n\n{value}")
         try:
-            await cb.message.edit_text(
-                "✅ Приз открыт и отправлен! 🎉",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🎰 Крутить", web_app=WebAppInfo(url=WEBAPP_URL))
-                ]])
-            )
+            await cb.message.edit_text("✅ Приз открыт! Содержимое отправлено выше.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🎰 Крутить", web_app=WebAppInfo(url=WEBAPP_URL)),
+                InlineKeyboardButton(text="🎁 Мои призы", callback_data="myprizes")
+            ]]))
         except Exception:
-            await bot.send_message(cb.from_user.id,"✅ Приз открыт и отправлен! 🎉",reply_markup=reply_menu())
-        await cb.answer("Приз получен!")
+            pass
+        await cb.answer("Приз открыт!")
     except Exception:
-        with db() as c: c.execute("UPDATE spins SET claimed=0 WHERE id=?",(spin_id,))
-        await cb.answer("Не удалось отправить приз. Проверь, что в настройках приза указан правильный URL или file_id.",show_alert=True)
+        with db() as c:
+            c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
+        await cb.answer("Не удалось отправить приз. Проверь медиа и попробуй снова.", show_alert=True)
 
 @dp.message(F.video | F.document)
 async def admin_video_file_id(m: Message):
