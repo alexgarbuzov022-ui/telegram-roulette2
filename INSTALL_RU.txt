@@ -1,48 +1,183 @@
-ИНСТРУКЦИЯ УСТАНОВКИ ОБНОВЛЕНИЯ
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Prize Roulette</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#08080c;--panel:#15151d;--gold:#d86bff;--muted:#aaa8b6}
+*{box-sizing:border-box}body{margin:0;padding:18px 13px 105px;background:radial-gradient(ellipse at top,#342515 0,#141016 42%,#08080c 78%);color:#fff;font-family:system-ui,sans-serif}main{max-width:680px;margin:auto}
+header{text-align:center}.tag{color:#d86bff;font-size:16px;font-weight:900;letter-spacing:3px;text-transform:none;text-shadow:0 0 12px #d86bff88}h1{font-size:27px;margin:7px 0}.muted{color:var(--muted);font-size:13px}
+.stats{display:flex;gap:9px;margin:16px 0}.stat{flex:1;text-align:center;padding:11px 6px;border:1px solid #4a236b;border-radius:14px;background:#15131a;color:var(--muted);font-size:12px}.num{display:block;color:var(--gold);font-size:22px;font-weight:900}
+.tabs{display:flex;gap:8px;margin:14px 0}.tab{flex:1;background:#17151d;color:#fff;border:1px solid #39313f;border-radius:12px;padding:10px;font-weight:700}.tab.active{border-color:var(--gold);color:var(--gold)}
+.bottom-nav{position:fixed;z-index:20;left:0;right:0;bottom:0;display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:#0c0b10f2;border-top:1px solid #482060;backdrop-filter:blur(16px);box-shadow:0 -8px 30px #0008}.bottom-nav .tab{margin:0;min-height:48px;border-radius:14px;background:#17151d}.bottom-nav .tab.active{background:#28113f;border-color:var(--gold)}
+.profile-head{display:flex;align-items:center;gap:12px}.avatar{width:58px;height:58px;border-radius:50%;object-fit:cover;border:2px solid var(--gold)}.panel{background:#111016;border:1px solid #3b3021;border-radius:17px;padding:14px;margin:13px 0}.section-title{font-size:16px;font-weight:850;margin:20px 2px 10px}
+.roulette{position:relative;overflow:hidden;border:1px solid #a52cff;border-radius:16px;background:linear-gradient(180deg,#211033,#0b0714);padding:12px 0;box-shadow:0 0 25px #b42aff33}
+.roulette:before,.roulette:after{content:"";position:absolute;z-index:2;top:0;bottom:0;width:25px;pointer-events:none}.roulette:before{left:0;background:linear-gradient(90deg,#0b0714,transparent)}.roulette:after{right:0;background:linear-gradient(270deg,#0b0714,transparent)}
+.pointer{position:absolute;z-index:4;left:50%;top:0;bottom:0;width:3px;background:var(--gold);transform:translateX(-50%);box-shadow:0 0 13px var(--gold)}.pointer:before{content:"▼";position:absolute;top:-2px;left:50%;transform:translateX(-50%);color:var(--gold)}
+.viewport{overflow:hidden}.track{display:flex;gap:9px;padding:8px 0;will-change:transform}.prize{flex:0 0 116px;min-height:140px;border:1px solid var(--edge,#8f35ff);border-radius:13px;background:linear-gradient(155deg,var(--tint,#291444),#131219 75%);padding:8px 7px;display:flex;flex-direction:column;align-items:center;text-align:center;justify-content:center;box-shadow:inset 0 0 13px #ffffff08}
+.prize img{width:58px;height:58px;object-fit:contain;border-radius:8px;margin-bottom:7px}.emoji{font-size:34px;line-height:1.2;margin-bottom:7px}.name{font-size:12px;font-weight:850;line-height:1.25}.desc{font-size:10px;color:#c4c0ce;margin-top:4px}.rarity{font-size:10px;color:var(--gold);margin-top:5px}.chance{font-size:10px;color:#aaa;margin-top:3px}.winner{border-color:#fff0a5;box-shadow:0 0 24px #c64dff80}.winner.win-reveal{z-index:6;animation:winnerCard 1.15s cubic-bezier(.2,.85,.25,1) both, prizeAura 1.8s ease-in-out infinite alternate}.winner.win-reveal img,.winner.win-reveal .emoji{animation:winnerIcon 1.1s cubic-bezier(.2,.85,.25,1) both;filter:drop-shadow(0 0 15px #ffe88a)}@keyframes winnerCard{0%{transform:scale(1)}35%{transform:scale(1.2)}65%{transform:scale(1.12)}100%{transform:scale(1.08)}}@keyframes winnerIcon{0%{transform:scale(1)}35%{transform:scale(1.7) rotate(-8deg)}65%{transform:scale(1.35) rotate(5deg)}100%{transform:scale(1.3)}}@keyframes prizeAura{0%{filter:brightness(1);box-shadow:0 0 12px #c64dff80, inset 0 0 13px #ffffff08}100%{filter:brightness(1.3);box-shadow:0 0 34px #ffe88aaa,0 0 55px #c64dff90,inset 0 0 24px #ffffff20}}
+button.primary{width:100%;border:1px solid #f5d8ff;border-radius:13px;padding:15px;font-size:16px;font-weight:900;color:#ffffff;background:linear-gradient(100deg,#c300ff,#4520ff);margin-top:12px}button:disabled{opacity:.55}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tile{background:#15141b;border:1px solid #38303f;border-radius:14px;padding:10px;text-align:center}.tile img{width:100%;height:100px;object-fit:contain}.tile .emoji{font-size:42px}.tile b{display:block;font-size:13px}.tile p{font-size:11px;color:#bbb;min-height:26px}.tile small{color:var(--gold)}
+#result{text-align:center;white-space:pre-line;min-height:32px;margin:12px 0;color:#f5d8ff;font-weight:850}.history-item{display:flex;align-items:center;gap:9px;border-bottom:1px solid #2b2832;padding:8px 0;font-size:12px}.history-item img{width:34px;height:34px;object-fit:contain}.history-item small{display:block;color:#aaa}.hidden{display:none!important}
+input,textarea,select{width:100%;padding:10px;border-radius:9px;border:1px solid #45404e;background:#0d0c12;color:#fff;margin:4px 0 9px}label{font-size:12px;color:#c6c2cf}button.secondary{background:#201c28;border:1px solid #5d267e;color:#df8cff;border-radius:10px;padding:10px;width:100%;margin:4px 0}hr{border:0;border-top:1px solid #302b37;margin:14px 0}
+.shop-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.buy-pack{padding:12px 4px;font-size:13px}
 
-В архиве находятся два файла для замены и этот файл-инструкция.
-
-1. Распакуй ZIP на компьютере.
-2. Открой GitHub: https://github.com/alexgarbuzov022-ui/telegram-roulette2
-3. Замени файл main.py содержимым из roulette_upgrade/main.py:
-   - открой main.py в GitHub;
-   - нажми карандаш Edit;
-   - замени весь код;
-   - нажми Commit changes.
-4. Замени web/index.html содержимым из roulette_upgrade/web/index.html:
-   - открой папку web в репозитории;
-   - открой index.html, нажми Edit;
-   - замени весь код;
-   - нажми Commit changes.
-5. В Render открой сервис telegram-roulette2 и дождись Deploy succeeded / Live.
-6. Открой бота в Telegram и отправь /start. Затем открой Mini App.
-
-Переменные Render должны быть сохранены:
-BOT_TOKEN = токен бота (не отправляй его в чат)
-WEBAPP_URL = https://telegram-roulette2.onrender.com
-ADMIN_IDS = числовые Telegram ID через запятую, например 111111111,222222222
-SPIN_PRICE_STARS = 50
-
-requirements.txt из этого архива не нужен: в проекте уже используются aiogram, fastapi, uvicorn, python-multipart и python-dotenv. Если в текущем requirements.txt их нет, добавь все пять.
-
-ЧТО ЕСТЬ В ЭТОЙ ВЕРСИИ
-- горизонтальная анимированная рулетка;
-- фиолетовый неоновый дизайн и нижние вкладки;
-- магазин вращений внутри Mini App с оплатой Telegram Stars;
-- бесплатные вращения для администраторов из ADMIN_IDS;
-- профиль и история;
-- раздел «Мои призы» в боте и кнопка получения приза;
-- добавление, редактирование и удаление призов в админке;
-- выдача текстового кода/текста, ссылки, фото или видео при корректно настроенном типе и содержимом.
-
-ВАЖНО
-- Сначала проверь тестовую покупку и тестовый приз.
-- Удаление приза необратимо для каталога; проверь на тестовом призе.
-- Бесплатный Render может засыпать после простоя.
-- SQLite на бесплатном Render может потерять данные при пересоздании экземпляра. Не используй это как надёжное production-хранилище платежей/инвентаря без постоянного диска или внешней базы.
-- TelegramConflictError означает, что второй процесс использует тот же токен для polling. Убедись, что не запущена другая копия бота (например, локально или в другом Render-сервисе).
-- Цифровые товары внутри Telegram оплачиваются Telegram Stars; не добавляй обходные карточные/крипто-платежи в Mini App.
+/* Редкость выигрыша: эффекты включаются только после остановки рулетки */
+@keyframes rarityGlow {0%,100%{filter:brightness(1);box-shadow:0 0 12px var(--rarity-glow,#fff4)}50%{filter:brightness(1.5);box-shadow:0 0 34px var(--rarity-glow,#fff8),inset 0 0 22px var(--rarity-glow,#fff3)}}
+@keyframes rarityPulse {0%,100%{transform:scale(1)}50%{transform:scale(1.015)}}
+@keyframes rarityFlash {0%{opacity:0}15%{opacity:.8}100%{opacity:0}}
+.roulette.rarity-common{--rarity-glow:#b9c0cc;animation:rarityGlow 1.2s ease-in-out 2}
+.roulette.rarity-rare{--rarity-glow:#3b9dff;animation:rarityGlow .9s ease-in-out 3;border-color:#3b9dff}
+.roulette.rarity-epic{--rarity-glow:#b44dff;animation:rarityGlow .7s ease-in-out 4,rarityPulse .7s ease-in-out 4;border-color:#d06aff}
+.roulette.rarity-legendary{--rarity-glow:#ffbf36;animation:rarityGlow .55s ease-in-out 5,rarityPulse .55s ease-in-out 5;border-color:#ffca4d}
+.roulette.rarity-mythic{--rarity-glow:#ff3eaf;animation:rarityGlow .42s ease-in-out 6,rarityPulse .42s ease-in-out 6;border-color:#ff3eaf}
+.roulette.rarity-epic,.roulette.rarity-legendary,.roulette.rarity-mythic{position:relative}
+.rarity-burst{position:fixed;inset:0;z-index:30;pointer-events:none;overflow:hidden}
+.rarity-burst i{position:absolute;top:42%;left:50%;width:7px;height:12px;border-radius:2px;background:var(--burst-color,#fff);animation:burstFly 1.1s ease-out forwards;box-shadow:0 0 8px currentColor}
+@keyframes burstFly{0%{transform:translate(0,0) rotate(0) scale(.5);opacity:1}100%{transform:translate(var(--dx),var(--dy)) rotate(650deg) scale(0);opacity:0}}
+.roulette.rarity-legendary:after,.roulette.rarity-mythic:after{content:'';position:absolute;inset:0;z-index:5;pointer-events:none;background:radial-gradient(circle, #fff9 0, transparent 68%);animation:rarityFlash .65s ease-out}
+@media(prefers-reduced-motion:reduce){.roulette.rarity-common,.roulette.rarity-rare,.roulette.rarity-epic,.roulette.rarity-legendary,.roulette.rarity-mythic,.rarity-burst i{animation-duration:.01ms!important;animation-iteration-count:1!important}}
 
 
-МЕДИАФАЙЛЫ ДЛЯ ПРИЗОВ
-В админке в поле «Фото и видео, которые получит победитель» выберите сразу несколько файлов с телефона/компьютера. Поддерживаются JPG, PNG, WEBP, GIF, MP4, WEBM и MOV; до 20 файлов, каждый до 20 МБ. Фото отправляются альбомами по 10, видео — отдельными сообщениями. При редактировании приза новый выбор файлов заменяет старый список. Файлы хранятся в папке uploads на Render; на бесплатном диске Render файлы могут исчезнуть при пересоздании сервиса, поэтому для постоянного хранения нужен постоянный диск или внешнее хранилище.
+/* Админка: всё раскрыто и сразу видно */
+#adminView{max-width:100%;}
+#adminView>.panel{padding:16px;border-color:#6b3290;background:linear-gradient(180deg,#17121f,#100e15)}
+#adminView h3{font-size:23px;margin:4px 0 8px}
+#adminView h4{font-size:16px;margin:8px 0 12px;color:#f0d7ff}
+#adminView .admin-intro{padding:12px;border:1px solid #56306e;border-radius:12px;background:#21142b;margin:12px 0}
+#adminView .library-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}
+#adminView .library-card{margin:0;padding:12px;border:1px solid #513069;background:#17121f;min-width:0}
+#adminView .library-card b{display:block;font-size:15px;margin-bottom:4px}
+#adminView .library-card input[type=file]{font-size:12px;padding:8px;background:#0c0b10}
+#adminView .library-card button{min-height:42px}
+#poolCounts{padding:10px;border-radius:10px;background:#21142b;color:#f0d7ff;margin:8px 0;font-weight:700}
+#poolStatus,#adminMsg{padding:10px;border-radius:10px;background:#19151f;margin:8px 0;min-height:18px;overflow-wrap:anywhere}
+#adminView .admin-block{border:1px solid #393040;border-radius:14px;padding:14px;margin:14px 0;background:#121016}
+#adminView .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}
+#adminView .form-grid .wide{grid-column:1/-1}
+#adminView label{display:block;margin-top:6px;font-weight:650}
+#adminView #savePrize{position:static;z-index:auto;box-shadow:none}
+#adminView .history-item{flex-wrap:wrap}
+@media(max-width:560px){body{padding-left:9px;padding-right:9px}#adminView>.panel{padding:10px}#adminView .library-grid{grid-template-columns:1fr;gap:8px}#adminView .library-card{display:grid;grid-template-columns:1fr;gap:3px}#adminView .form-grid{grid-template-columns:1fr}#adminView .form-grid .wide{grid-column:auto}#adminView .primary{bottom:76px}}
+</style></head><body><main>
+<header><div class="tag">XDarryanaX</div><h1>💜 Призовая рулетка</h1><p class="muted">Выигрывай почти задаром! 🔥</p><p class="muted">📸 Фото • 🎥 Видео • 💎 Скидки • 🔒 Приват • ✨ Эксклюзив</p><p class="muted">Крути рулетку и забирай свои призы!</p></header>
+<div class="stats"><div class="stat">Вращения<span class="num" id="spins">—</span></div></div>
+
+<section id="paymentView" class="hidden"><div class="section-title">Оплата и покупка вращений</div><div class="panel"><b>⭐ Купить вращения</b><p class="muted">Оплата ⭐ Stars, переводом на карту или TON. Курс для альтернативной оплаты: 1 ⭐ = 2 ₽.</p><div class="shop-grid"><button class="secondary buy-pack" data-pack="1">1 вращение<br><b>50 ⭐</b><br><small>100 ₽</small></button><button class="secondary buy-pack" data-pack="3">3 вращения<br><b>120 ⭐</b><br><small>240 ₽</small></button><button class="secondary buy-pack" data-pack="10">10 вращений<br><b>400 ⭐</b><br><small>800 ₽</small></button></div><p class="muted" id="buyStatus"></p><hr><b>Оплата картой или TON</b><label>Пакет для альтернативной оплаты</label><select id="altPack"><option value="1">1 вращение — 100 ₽</option><option value="3">3 вращения — 240 ₽</option><option value="10">10 вращений — 800 ₽</option></select><label>Способ оплаты</label><select id="altMethod"><option value="card">Банковская карта</option><option value="ton">TON</option></select><div class="muted" id="paymentDetails"></div><button class="secondary" id="copyPaymentDetails">📋 Копировать реквизиты</button><p class="muted" id="copyStatus" aria-live="polite"></p><label>Прикрепить чек (изображение или PDF, до 10 МБ)</label><input id="paymentReceipt" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"><label>Номер операции или комментарий</label><input id="paymentProof" placeholder="Например, номер перевода"><button class="secondary" id="createPaymentOrder">Я оплатил — отправить заявку админу</button><p class="muted">Вращения будут начислены после ручной проверки администратором.</p></div>
+</section>
+<section id="rouletteView">
+<div class="section-title">Горизонтальная рулетка</div><div class="roulette"><div class="pointer"></div><div class="viewport"><div class="track" id="track"></div></div></div>
+<button class="primary" id="spin" disabled>Загрузка…</button><div id="result"></div>
+<div class="section-title">Каталог призов</div><div class="grid" id="catalog"></div>
+</section>
+<section id="profileView" class="hidden"><div class="panel"><div class="profile-head"><img id="avatar" class="avatar hidden" alt="Аватар Telegram"><div><h3>👤 Твой профиль</h3><p id="profileName" class="muted"></p></div></div><p>Telegram ID: <b id="uid">—</b></p><p>Вращения: <b id="profileSpins">—</b></p><p>Приглашённые друзья с покупкой: <b id="refs">—</b></p><button class="secondary" id="share">Пригласить друга</button></div><div class="panel"><b>История выигрышей</b><div id="history"></div></div><div class="panel"><b>История оплат</b><div id="payments" class="muted"></div></div></section>
+<section id="adminView" class="hidden"><div class="panel"><h3>⚙️ Админ-панель</h3><p class="muted">Все разделы открыты постоянно — ничего не нужно сворачивать или раскрывать. На телефоне блоки идут друг за другом.</p>
+<div class="admin-intro"><b>📎 Медиа загружается отдельно в каждый приз</b><p class="muted">При редактировании выбери все фото или видео для этого приза. Название задаёт количество: «Набор из 3 фото», «Набор из 10 фото», «Видео 3 шт». Если количество не указано — выдаётся один случайный файл.</p></div>
+<div class="admin-block"><h4>🎁 Создать приз</h4><p class="muted">Сначала введи название — ниже сразу покажется выбранная категория выдачи.</p>
+<div class="form-grid"><div class="wide"><input id="pid" type="hidden"><label>Название приза</label><input id="pname" placeholder="Например, Фото модели"></div>
+<div><label>Описание</label><textarea id="pdesc" placeholder="Что получает победитель"></textarea></div><div><label>Картинка карточки (URL)</label><input id="pimage" placeholder="https://..."></div><div><label>Или загрузить картинку карточки</label><input id="pfile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></div><div class="wide"><label>Медиа для выдачи этого приза (можно выбрать несколько)</label><input id="prizeMediaFiles" type="file" accept="image/*,video/mp4,video/webm,video/quicktime" multiple><small class="muted">Выбранные файлы сохраняются у этого приза. При редактировании новые файлы добавятся к уже сохранённым.</small><div id="mediaStatus" class="muted"></div></div>
+<div><label>Редкость</label><select id="prarity"><option>Обычный</option><option>Редкий</option><option>Эпический</option><option>Легендарный</option><option>Мифический</option></select>
+<div><label>Вес / шанс относительно других призов</label><input id="pweight" type="number" min="0.001" step="0.1" value="10"></div>
+<label style="display:none">Служебное поле</label><input id="ppoints" type="hidden" value="0">
+<div><label>Тип выдачи приза</label><select id="ptype"><option value="points">Без дополнительной выдачи</option><option value="text">Текст или код</option><option value="link">Ссылка</option><option value="photo">Фото (URL или Telegram file_id)</option><option value="video">Видео (URL или Telegram file_id)</option><option value="media_group">Набор фото и видео из загрузок</option></select></div><div class="wide"><label>Содержимое для текста, кода или ссылки (если нужно)</label><input id="pdelivery" placeholder="Код или ссылка для победителя"></div></div>
+<button class="primary" id="savePrize">💾 Сохранить приз</button><button class="secondary" id="cancelEdit">Очистить форму / отменить редактирование</button></div><div class="admin-block"><h4>💳 Реквизиты оплаты</h4><label>Номер карты / реквизиты СБП</label><textarea id="adminCardDetails" placeholder="Вставь номер карты, банк и имя получателя"></textarea><label>Адрес TON-кошелька</label><input id="adminTonWallet" placeholder="TON wallet address"><label>Курс для ручной оплаты: рублей за 1 ⭐</label><input id="adminRubRate" type="number" min="1" value="2"><button class="secondary" id="savePaymentSettings">Сохранить реквизиты</button><p class="muted">Новые реквизиты сразу показываются покупателям. Старые заявки сохраняют сумму, рассчитанную в момент создания.</p></div><div class="admin-block"><h4>🧾 Заявки на оплату</h4><div id="adminOrders"></div></div><div class="admin-block"><h4>🎁 Существующие призы</h4><button class="secondary" id="undoDelete">↩️ Восстановить последний удалённый приз</button><div id="adminPrizes"></div></div><div class="admin-block"><h4>👥 Добавить администратора</h4><label>Telegram ID</label><input id="newAdmin" type="number"><button class="secondary" id="addAdmin">Добавить админа</button></div><div class="admin-block"><h4>📣 Рассылка</h4><textarea id="broadcastText" placeholder="Сообщение всем пользователям"></textarea><button class="secondary" id="broadcast">Отправить рассылку</button><p class="muted" id="adminMsg"></p></div></div></section>
+<p class="muted" style="text-align:center">Результат определяет сервер. Выигрыш отображается в истории профиля.</p>
+<nav class="bottom-nav"><button class="tab" data-tab="payment">💳<br>Оплата</button><button class="tab active" data-tab="roulette">🎰<br>Рулетка</button><button class="tab" data-tab="profile">👤<br>Профиль</button><button class="tab hidden" id="adminTab" data-tab="admin">⚙️<br>Админка</button></nav>
+</main><script>
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const initData=tg?.initData||'';let busy=false,prizes=[];
+const rarityColors={'Обычный':'#a7a7ad','Редкий':'#4b9fff','Эпический':'#c16aff','Легендарный':'#ffc34f','Мифический':'#ff5c9d'};
+function esc(s){return String(s??'').replace(/[&<>"']/g,a=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[a]))}
+async function req(path,method='GET',body){const opts={method,headers:{Authorization:'tma '+initData}};if(body instanceof FormData)opts.body=body;else if(body){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}const r=await fetch(path,opts);const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'Ошибка запроса');return d}
+function card(p,compact=false){let el=document.createElement('div');el.className='prize';el.style.setProperty('--edge',rarityColors[p.rarity]||'#d9b75a');el.style.setProperty('--tint',(rarityColors[p.rarity]||'#d9b75a')+'25');const visual=p.image?'<img src="'+esc(p.image)+'" alt="">':'<div class="emoji">🎁</div>';el.innerHTML=visual+'<div class="name">'+esc(p.name)+'</div>'+(compact?'':'<div class="desc">'+esc(p.description||'')+'</div>')+'<div class="rarity">'+esc(p.rarity)+'</div><div class="chance">'+Number(p.chance||0).toFixed(2)+'%</div>';return el}
+function renderCatalog(){const cat=document.querySelector('#catalog');cat.innerHTML='';prizes.forEach(p=>{let el=document.createElement('div');el.className='tile';el.innerHTML=(p.image?'<img src="'+esc(p.image)+'">':'<div class="emoji">🎁</div>')+'<b>'+esc(p.name)+'</b><p>'+esc(p.description||'')+'</p><small>'+esc(p.rarity)+' · '+Number(p.chance||0).toFixed(2)+'%</small>';cat.appendChild(el)})}
+function fillTrack(winner=null){const track=document.querySelector('#track');track.innerHTML='';const seq=[];for(let i=0;i<50;i++)seq.push(prizes[Math.floor(Math.random()*prizes.length)]);if(winner){seq[42]=winner}seq.forEach(p=>track.appendChild(card(p,true)));track.style.transition='none';track.style.transform='translateX(0)';return seq}
+async function refresh(){const [m,p]=await Promise.all([req('/api/me'),req('/api/prizes')]);prizes=p.prizes;document.querySelector('#spins').textContent=m.spins;document.querySelector('#uid').textContent=m.telegram_id;document.querySelector('#profileSpins').textContent=m.spins;document.querySelector('#refs').textContent=m.referrals;const tu=tg?.initDataUnsafe?.user||{};document.querySelector('#profileName').textContent=[tu.first_name,tu.last_name].filter(Boolean).join(' ')||'Пользователь Telegram';const av=document.querySelector('#avatar');if(tu.photo_url){av.src=tu.photo_url;av.classList.remove('hidden')}else{av.classList.add('hidden')}window.referralLink=m.referral_link||'';document.querySelector('#history').innerHTML=m.history.length?m.history.map(v=>'<div class="history-item">'+(v.image?'<img src="'+esc(v.image)+'">':'🎁')+'<div>'+esc(v.prize)+'<small>'+esc(v.rarity)+' · '+esc(v.at)+'</small></div></div>').join(''):'<p class="muted">Пока нет выигрышей</p>';document.querySelector('#payments').innerHTML=m.payments.length?m.payments.map(v=>esc(v.spins_added)+' вращений · '+esc(v.total_amount)+' '+esc(v.currency)+' · '+esc(v.created_at)).join('<br>'):'Покупок пока нет';document.querySelector('#adminTab').classList.toggle('hidden',!m.is_admin);document.querySelector('#spin').textContent=m.is_admin?'КРУТИТЬ БЕСПЛАТНО (АДМИН)':(m.spins?'КРУТИТЬ РУЛЕТКУ':'Открой раздел «Оплата»');document.querySelector('#spin').dataset.ready=(m.is_admin||m.spins)?'1':'0';document.querySelector('#spin').disabled=false;renderCatalog();fillTrack();if(m.is_admin)loadAdmin()}
+async function loadAdmin(){try{const d=await req('/api/admin/overview');if(d.payment_settings){document.querySelector('#adminCardDetails').value=d.payment_settings.card_details||'';document.querySelector('#adminTonWallet').value=d.payment_settings.ton_wallet||'';document.querySelector('#adminRubRate').value=d.payment_settings.rub_per_star||2;}document.querySelector('#adminOrders').innerHTML=(d.orders||[]).map(o=>{let info={};try{info=JSON.parse(o.details||'{}')}catch(e){};return '<div class="history-item"><div style="flex:1"><b>'+esc(o.method==='ton'?'TON':'Карта')+'</b> · '+esc(info.spins||'?')+' вращений · '+esc(info.rub||'?')+' ₽<small>ID '+esc(o.id)+' · пользователь '+esc(o.telegram_id)+' · '+esc(o.status)+'</small><small>'+esc(info.proof||'')+'</small></div>'+(o.status==='pending'?'<button class="secondary" data-approve-order="'+esc(o.id)+'" style="width:auto">Подтвердить</button>':'')+'</div>'}).join('')||'<p class="muted">Заявок пока нет</p>';document.querySelectorAll('[data-approve-order]').forEach(b=>b.onclick=async()=>{if(!confirm('Подтвердить оплату и начислить вращения?'))return;try{await req('/api/admin/orders/'+encodeURIComponent(b.dataset.approveOrder)+'/approve','POST',{});await refresh();document.querySelector('#adminMsg').textContent='Оплата подтверждена'}catch(e){document.querySelector('#adminMsg').textContent=e.message}});document.querySelector('#adminPrizes').innerHTML=d.prizes.map(p=>'<div class="history-item"><div style="flex:1">'+(p.image?'<img src="'+esc(p.image)+'" style="width:38px;height:38px;object-fit:contain;vertical-align:middle;margin-right:8px">':'')+esc(p.name)+'<small>'+esc(p.rarity)+' · вес '+esc(p.weight)+' · '+(p.enabled?'включён':'выключен')+'</small></div><button class="secondary" data-edit="'+esc(p.id)+'" style="width:auto;margin:2px">Изменить</button><button class="secondary" data-delete="'+esc(p.id)+'" style="width:auto;margin:2px;color:#ff8888">Удалить</button></div>').join('');document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{const p=d.prizes.find(x=>x.id===b.dataset.edit);if(!p)return;document.querySelector('#pid').value=p.id;document.querySelector('#pname').value=p.name||'';document.querySelector('#pdesc').value=p.description||'';document.querySelector('#pimage').value=p.image||'';document.querySelector('#prarity').value=p.rarity||'Обычный';document.querySelector('#pweight').value=p.weight??1;document.querySelector('#ppoints').value=p.points??0;document.querySelector('#pdelivery').value=p.delivery_value||'';document.querySelector('#ptype').value=p.type||'points';document.querySelector('#mediaStatus').textContent=(p.media_files||[]).length?'Уже прикреплено файлов: '+p.media_files.length+' (новый выбор заменит список)':'';window.currentMediaFiles=p.media_files||[];document.querySelector('#prizeMediaFiles').value='';document.querySelector('#savePrize').textContent='Сохранить изменения';document.querySelector('#adminMsg').textContent='Редактирование: '+p.name;window.scrollTo({top:0,behavior:'smooth'})});document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{const p=d.prizes.find(x=>x.id===b.dataset.delete);if(!p||!confirm('Удалить приз «'+p.name+'» навсегда?'))return;try{await req('/api/admin/prizes/'+encodeURIComponent(p.id),'DELETE');document.querySelector('#adminMsg').textContent='Приз удалён';await refresh()}catch(e){document.querySelector('#adminMsg').textContent=e.message}})}catch(e){document.querySelector('#adminMsg').textContent=e.message}}
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===b));['payment','roulette','profile','admin'].forEach(v=>document.querySelector('#'+v+'View').classList.toggle('hidden',v!==b.dataset.tab));if(b.dataset.tab==='payment')loadPaymentOptions()});
+
+function rarityClass(rarity){const r=String(rarity||'').toLowerCase();if(r.includes('миф'))return 'mythic';if(r.includes('леген'))return 'legendary';if(r.includes('эпич'))return 'epic';if(r.includes('редк'))return 'rare';return 'common'}
+function showRarityEffect(rarity){const roulette=document.querySelector('.roulette');roulette.classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');const level=rarityClass(rarity);void roulette.offsetWidth;roulette.classList.add('rarity-'+level);if(['epic','legendary','mythic'].includes(level)){const burst=document.createElement('div');burst.className='rarity-burst';const colors=level==='mythic'?['#ff3eaf','#ff77cf','#fff','#a855f7']:level==='legendary'?['#ffbf36','#fff0a8','#fff','#ff8c2a']:['#b44dff','#e0a5ff','#fff','#7c3aed'];const count=level==='mythic'?58:level==='legendary'?42:26;for(let i=0;i<count;i++){const bit=document.createElement('i');const angle=Math.random()*Math.PI*2;const distance=90+Math.random()*(level==='mythic'?280:210);bit.style.setProperty('--dx',Math.cos(angle)*distance+'px');bit.style.setProperty('--dy',Math.sin(angle)*distance+'px');bit.style.setProperty('--burst-color',colors[i%colors.length]);bit.style.left=(50+(Math.random()-.5)*10)+'%';bit.style.top=(42+(Math.random()-.5)*10)+'%';bit.style.animationDelay=(Math.random()*.18)+'s';burst.appendChild(bit)}document.body.appendChild(burst);setTimeout(()=>burst.remove(),1600)}if(tg?.HapticFeedback){try{tg.HapticFeedback.notificationOccurred(level==='mythic'||level==='legendary'?'success':'success');if(level==='mythic'||level==='legendary')tg.HapticFeedback.impactOccurred('heavy');else if(level==='epic')tg.HapticFeedback.impactOccurred('medium')}catch(e){}}}
+
+let awaitingClaim=false;
+document.querySelector('#spin').onclick=async()=>{
+ if(busy||awaitingClaim)return;
+ if(document.querySelector('#spin').dataset.ready!=='1'){document.querySelector('#result').textContent='Открой раздел «Оплата» и выбери пакет вращений.';return}
+ busy=true;const b=document.querySelector('#spin');b.disabled=true;
+ document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
+ document.querySelector('#result').textContent='';
+ try{
+  const out=await req('/api/spin','POST');
+  const win=prizes.find(p=>p.id===out.prize_id)||prizes[0];
+  fillTrack(win);
+  const track=document.querySelector('#track'),viewport=document.querySelector('.viewport'),cardEl=track.children[42];
+  cardEl.classList.add('winner');
+  const step=125;
+  const target=42*step+cardEl.offsetWidth/2-viewport.clientWidth/2;
+  track.getBoundingClientRect();
+  track.style.transition='transform 7.2s cubic-bezier(.06,.68,.12,1)';
+  track.style.transform='translateX('+(-target)+'px)';
+  await new Promise(r=>setTimeout(r,7350));
+  cardEl.classList.add('win-reveal');
+  showRarityEffect(out.rarity);
+  if(out.prize_type==='spins'){
+   awaitingClaim=false;
+   b.disabled=false;
+   b.textContent='🎰 КРУТИТЬ';
+   document.querySelector('#result').innerHTML='<div>✨ '+(out.prize||'Бонус')+'!</div><div class="muted" style="margin:6px 0">Дополнительные вращения уже начислены автоматически.</div>';
+   tg?.HapticFeedback?.notificationOccurred('success');
+   const me=await req('/api/me');
+   document.querySelector('#spins').textContent=me.spins;
+   document.querySelector('#profileSpins').textContent=me.spins;
+   await new Promise(r=>setTimeout(r,1800));
+   cardEl.classList.remove('winner','win-reveal');
+   document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
+   track.style.transition='none';track.style.transform='translateX(0)';
+   fillTrack();
+   return;
+  }
+  awaitingClaim=true;
+  b.disabled=false;
+  b.textContent='🎁 ПОЛУЧИТЬ ПРИЗ';
+  document.querySelector('#result').innerHTML='<div>🎉 Выигрыш определён!</div><div class="muted" style="margin:6px 0">Эффекты будут продолжаться, пока ты не нажмёшь «Получить приз».</div>';
+  b.onclick=async()=>{
+   if(!awaitingClaim||busy)return;
+   busy=true;b.disabled=true;
+   try{
+    // Claim is confirmed here; media delivery remains in the bot's «Мои призы» flow.
+    document.querySelector('#result').innerHTML='<div>🎁 Выигрыш подтверждён. Открой чат с ботом и нажми «🎁 Мои призы», чтобы получить медиа.</div>';
+    b.textContent='🎰 КРУТИТЬ';
+    document.querySelector('.roulette').classList.remove('rarity-common','rarity-rare','rarity-epic','rarity-legendary','rarity-mythic');
+    cardEl.classList.remove('winner','win-reveal');
+    track.style.transition='none';track.style.transform='translateX(0)';
+    fillTrack();awaitingClaim=false;await refresh();
+   }catch(e){document.querySelector('#result').textContent=e.message;}
+   finally{busy=false;b.disabled=false;}
+  };
+  tg?.HapticFeedback?.notificationOccurred('success');
+  // Update balance without rebuilding the winning track.
+  const me=await req('/api/me');
+  document.querySelector('#spins').textContent=me.spins;
+  document.querySelector('#profileSpins').textContent=me.spins;
+ }catch(e){
+  document.querySelector('#result').textContent=e.message;
+  awaitingClaim=false;busy=false;b.disabled=false;
+  await refresh().catch(()=>{});
+ }
+ finally{busy=false;if(!awaitingClaim)b.disabled=false}
+}
+let currentPaymentDetails='';
+async function loadPaymentOptions(){try{const d=await req('/api/payment-options');const method=document.querySelector('#altMethod').value;currentPaymentDetails=String(method==='card'?d.card_details:d.ton_wallet||'').trim();document.querySelector('#paymentDetails').textContent=method==='card'?'Реквизиты карты / СБП: '+(currentPaymentDetails||'Администратор ещё не указал реквизиты'):'Адрес TON-кошелька: '+(currentPaymentDetails||'Администратор ещё не указал кошелёк');const cb=document.querySelector('#copyPaymentDetails');cb.disabled=!currentPaymentDetails;cb.textContent=method==='card'?'📋 Копировать реквизиты карты / СБП':'📋 Копировать адрес TON';document.querySelector('#copyStatus').textContent='';}catch(e){document.querySelector('#paymentDetails').textContent=e.message;document.querySelector('#copyPaymentDetails').disabled=true}}
+async function copyTextCompat(text){if(!text)throw Error('Реквизиты ещё не настроены.');try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return}}catch(e){}const ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';ta.style.fontSize='16px';document.body.appendChild(ta);ta.focus();ta.select();ta.setSelectionRange(0,ta.value.length);let ok=false;try{ok=document.execCommand('copy')}catch(e){}ta.remove();if(!ok)throw Error('Не удалось скопировать автоматически. Нажми и удерживай реквизиты, чтобы скопировать вручную.')}
+document.querySelector('#copyPaymentDetails')?.addEventListener('click',async()=>{const b=document.querySelector('#copyPaymentDetails');const status=document.querySelector('#copyStatus');try{b.disabled=true;await copyTextCompat(currentPaymentDetails);status.textContent='✅ Реквизиты скопированы. Вставь их в банковское приложение или кошелёк.';if(tg?.HapticFeedback)tg.HapticFeedback.notificationOccurred('success')}catch(e){status.textContent=e.message}finally{b.disabled=!currentPaymentDetails}});
+document.querySelector('#altMethod')?.addEventListener('change',loadPaymentOptions);loadPaymentOptions();
+document.querySelector('#createPaymentOrder')?.addEventListener('click',async()=>{const b=document.querySelector('#createPaymentOrder');try{b.disabled=true;let proof=document.querySelector('#paymentProof').value.trim();const receipt=document.querySelector('#paymentReceipt').files[0];if(!receipt)throw Error('Прикрепи скриншот или PDF чека перед отправкой заявки.');if(receipt){const fd=new FormData();fd.append('file',receipt);const up=await req('/api/payment-receipt','POST',fd);proof=(proof?proof+' · ':'')+'Чек: '+up.url;}const d=await req('/api/payment-orders','POST',{spins:Number(document.querySelector('#altPack').value),method:document.querySelector('#altMethod').value,proof:proof||'Пользователь отправил заявку без комментария',username:tg?.initDataUnsafe?.user?.username||''});document.querySelector('#buyStatus').textContent='Заявка '+d.order_id+' отправлена администратору. После проверки начислят '+document.querySelector('#altPack').value+' вращений.';document.querySelector('#paymentProof').value='';document.querySelector('#paymentReceipt').value='';}catch(e){document.querySelector('#buyStatus').textContent=e.message}finally{b.disabled=false}});
+document.querySelectorAll('.buy-pack').forEach(btn=>btn.onclick=async()=>{const status=document.querySelector('#buyStatus');try{if(!tg?.openInvoice)throw Error('Оплата доступна только внутри Telegram. Открой Mini App из бота.');btn.disabled=true;status.textContent='Создаём счёт…';const d=await req('/api/create-invoice','POST',{spins:Number(btn.dataset.pack)});tg.openInvoice(d.url,async state=>{if(state==='paid'){status.textContent='Оплата прошла! Обновляем баланс…';await new Promise(r=>setTimeout(r,1000));await refresh();status.textContent='Вращения начислены 🎉'}else if(state==='cancelled'){status.textContent='Оплата отменена.'}else if(state==='failed'){status.textContent='Оплата не прошла. Попробуй ещё раз.'}})}catch(e){status.textContent=e.message}finally{btn.disabled=false}});
+document.querySelector('#share').onclick=()=>{const link=window.referralLink||'';if(!link){alert('Не удалось получить ссылку. Открой приложение заново.');return}tg?.openTelegramLink?.('https://t.me/share/url?url='+encodeURIComponent(link)+'&text='+encodeURIComponent('Заходи в рулетку! За первую покупку по моей ссылке я получу 3 бонусных вращения.'))};
+document.querySelector('#undoDelete')?.addEventListener('click',async()=>{if(!confirm('Восстановить последний удалённый приз?'))return;try{const d=await req('/api/admin/undo-delete','POST',{});document.querySelector('#adminMsg').textContent='Восстановлен приз: '+d.name;await refresh()}catch(e){document.querySelector('#adminMsg').textContent=e.message}});
+document.querySelector('#cancelEdit')?.addEventListener('click',()=>{document.querySelector('#pid').value='';['pname','pdesc','pimage','pdelivery'].forEach(id=>document.querySelector('#'+id).value='');document.querySelector('#pfile').value='';document.querySelector('#prizeMediaFiles').value='';document.querySelector('#mediaStatus').textContent='';document.querySelector('#pweight').value='10';document.querySelector('#ppoints').value='0';document.querySelector('#ptype').value='points';document.querySelector('#prarity').value='Обычный';window.currentMediaFiles=[];document.querySelector('#savePrize').textContent='Добавить приз';document.querySelector('#adminMsg').textContent='Редактирование отменено; призы не изменены';});
+document.querySelector('#savePrize').onclick=async()=>{const msg=document.querySelector('#adminMsg');try{let image=document.querySelector('#pimage').value.trim();const f=document.querySelector('#pfile').files[0];if(f){const fd=new FormData();fd.append('file',f);const u=await req('/api/admin/upload','POST',fd);image=u.url}let mediaFiles=[...(window.currentMediaFiles||[])];const mediaInput=document.querySelector('#prizeMediaFiles');const selected=[...(mediaInput.files||[])];if(selected.length){const fd=new FormData();selected.forEach(file=>fd.append('files',file));const uploaded=await req('/api/admin/upload-media','POST',fd);mediaFiles=mediaFiles.concat(uploaded.files||[]);}const name=document.querySelector('#pname').value;const countMatch=name.toLowerCase().match(/(?:набор\\s+из\\s+)?(10|3|1)\\s*(?:фото|фотограф|видео|шт)/);const needed=countMatch?Number(countMatch[1]):1;if(mediaFiles.length&&mediaFiles.length<needed)throw new Error('Для этого приза нужно минимум '+needed+' файлов, сейчас '+mediaFiles.length);await req('/api/admin/prizes','POST',{id:document.querySelector('#pid').value||undefined,name,description:document.querySelector('#pdesc').value,image,rarity:document.querySelector('#prarity').value,weight:Number(document.querySelector('#pweight').value),points:Number(document.querySelector('#ppoints').value),delivery_value:document.querySelector('#pdelivery').value,type:mediaFiles.length?'media_group':document.querySelector('#ptype').value,media_files:mediaFiles,media_pool:'',enabled:true});msg.textContent='Приз сохранён';window.currentMediaFiles=[];document.querySelector('#pid').value='';document.querySelector('#pname').value='';document.querySelector('#pdesc').value='';document.querySelector('#pimage').value='';document.querySelector('#pfile').value='';document.querySelector('#prizeMediaFiles').value='';document.querySelector('#mediaStatus').textContent='';document.querySelector('#pweight').value='10';document.querySelector('#ppoints').value='0';document.querySelector('#pdelivery').value='';document.querySelector('#ptype').value='points';document.querySelector('#prizeMediaFiles').value='';document.querySelector('#savePrize').textContent='Добавить приз';await refresh()}catch(e){msg.textContent=e.message;document.querySelector('#mediaStatus').textContent=''}};
+async function refreshPoolCounts(){try{const data=await req('/api/admin/media-pool');const files=data.files||[];const names={photo:'📸 Фото',video_noface:'🎥 Видео без лица',video_face:'🎬 Видео с лицом'};document.querySelector('#poolCounts').textContent=Object.keys(names).map(k=>names[k]+': '+files.filter(f=>f.category===k).length).join(' · ')}catch(e){document.querySelector('#poolCounts').textContent='Количество файлов будет показано после открытия админки'}}
+function detectMediaPool(title){const n=String(title||'').toLowerCase().replaceAll('ё','е');if(/видео.*(с лицом|с_лицом|face|лицо)|((с лицом|с_лицом|withface|face).*(видео|ролик))/.test(n))return 'video_face';if(/видео.*(без лица|без_лица|noface|no_face|faceless)|((без лица|без_лица|noface|no_face|faceless).*(видео|ролик))/.test(n))return 'video_noface';if(/фото|фотограф|photo|picture|картин/.test(n))return 'photo';return '';}
+document.querySelector('#savePaymentSettings')?.addEventListener('click',async()=>{try{await req('/api/admin/payment-settings','POST',{card_details:document.querySelector('#adminCardDetails').value,ton_wallet:document.querySelector('#adminTonWallet').value,rub_per_star:Number(document.querySelector('#adminRubRate').value)});document.querySelector('#adminMsg').textContent='Реквизиты оплаты сохранены';await loadPaymentOptions()}catch(e){document.querySelector('#adminMsg').textContent=e.message}});
+document.querySelector('#addAdmin').onclick=async()=>{try{await req('/api/admin/admins','POST',{telegram_id:Number(document.querySelector('#newAdmin').value)});document.querySelector('#adminMsg').textContent='Администратор добавлен'}catch(e){document.querySelector('#adminMsg').textContent=e.message}};
+document.querySelector('#broadcast').onclick=async()=>{try{const d=await req('/api/admin/broadcast','POST',{text:document.querySelector('#broadcastText').value});document.querySelector('#adminMsg').textContent='Отправлено: '+d.sent}catch(e){document.querySelector('#adminMsg').textContent=e.message}};
+refresh().catch(e=>{document.querySelector('#result').textContent='Открой Mini App через Telegram. '+e.message});
+</script></body></html>
