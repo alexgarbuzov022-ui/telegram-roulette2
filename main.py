@@ -537,6 +537,14 @@ async def create_invoice(payload: dict, authorization: str|None=Header(default=N
 @app.post("/api/spin")
 async def spin(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
+    # Get username from Telegram's validated WebApp initData.
+    try:
+        tg_user = validate_init_data(authorization[4:]) if authorization and authorization.startswith("tma ") else {}
+        username = tg_user.get("username")
+        full_name = " ".join(x for x in (tg_user.get("first_name"), tg_user.get("last_name")) if x).strip()
+        user_label = f"@{username}" if username else (full_name or f"ID {uid}")
+    except Exception:
+        user_label = f"ID {uid}"
     admin_free = is_admin(uid)
     with db() as c:
         if USE_POSTGRES:
@@ -643,13 +651,9 @@ async def spin(authorization: str|None=Header(default=None)):
         spin_id = spin_cursor.lastrowid
     # Notify all configured admins about every win (including wins by admins).
     try:
-        with db() as c:
-            winner=c.execute("SELECT telegram_id FROM users WHERE telegram_id=?",(uid,)).fetchone()
-        uname=""
-        # username is supplied by Telegram WebApp initData, stored from the validated user payload when possible.
         for admin_id in admin_ids_all():
             try:
-                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\nПользователь: {uid}\nПриз: {chosen['name']}\nРедкость: {chosen['rarity']}\nID приза: {chosen['id']}")
+                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\\nПользователь: {user_label} (ID: {uid})\\nПриз: {chosen['name']}\\nРедкость: {chosen['rarity']}\\nID приза: {chosen['id']}")
             except Exception: pass
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
