@@ -759,7 +759,10 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
     oid=uuid.uuid4().hex[:12]
     rub_rate=max(1, min(100000, int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)))
     with db() as c:
-        pending_discount = c.execute("SELECT 1 FROM orders WHERE telegram_id=? AND status='pending' AND details LIKE '%\"discount_pct\": 10%' LIMIT 1", (uid,)).fetchone()
+        pending_discount = c.execute(
+            "SELECT 1 FROM orders WHERE telegram_id=? AND status='pending' AND details LIKE ? LIMIT 1",
+            (uid, '%"discount_pct": 10%')
+        ).fetchone()
         if pending_discount:
             raise HTTPException(409, "У тебя уже есть ожидающая подтверждения заявка со скидкой. Дождись решения администратора.")
         user = c.execute("SELECT spin_discount_pct,spin_discount_expires_at FROM users WHERE telegram_id=?", (uid,)).fetchone()
