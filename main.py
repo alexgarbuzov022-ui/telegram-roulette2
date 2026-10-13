@@ -276,6 +276,37 @@ def prize_dict(r):
             "media_pool":r["media_pool"] if "media_pool" in r.keys() else "",
             "enabled":bool(r["enabled"])}
 
+
+def upload_to_cloudinary(data: bytes, filename: str, content_type: str):
+    """Store uploaded prize media outside Render's temporary filesystem."""
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
+    api_key = os.getenv("CLOUDINARY_API_KEY", "").strip()
+    api_secret = os.getenv("CLOUDINARY_API_SECRET", "").strip()
+    if not (cloud_name and api_key and api_secret):
+        raise HTTPException(503, "Cloudinary не настроен: добавь CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY и CLOUDINARY_API_SECRET в Render Environment.")
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+        resource_type = "video" if (content_type or "").startswith("video/") else "image"
+        result = cloudinary.uploader.upload(
+            data,
+            resource_type=resource_type,
+            folder=os.getenv("CLOUDINARY_FOLDER", "telegram-roulette"),
+            public_id=Path(filename).stem,
+            overwrite=False,
+            unique_filename=True,
+        )
+        url = result.get("secure_url")
+        if not url:
+            raise ValueError("Cloudinary не вернул secure_url")
+        return url
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Cloudinary upload failed: {exc}")
+        raise HTTPException(502, "Не удалось сохранить файл в Cloudinary. Проверь настройки Cloudinary и попробуй ещё раз.")
+
 @app.get("/")
 async def home(): return FileResponse(BASE / "web" / "index.html")
 
@@ -872,9 +903,9 @@ async def upload_image(file: UploadFile=File(...), authorization: str|None=Heade
     ext = {"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif"}.get(file.content_type)
     if not ext: raise HTTPException(400,"Поддерживаются JPG, PNG, WEBP, GIF")
     name = uuid.uuid4().hex + ext
-    folder = BASE/"uploads"; folder.mkdir(exist_ok=True); (folder/name).write_bytes(data)
+    url = upload_to_cloudinary(data, name, file.content_type)
     audit(uid,"upload_image",name)
-    return {"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name}
+    return {"url":url}
 
 @app.post("/api/admin/upload-media")
 async def upload_media(files: list[UploadFile]=File(...), authorization: str|None=Header(default=None)):
@@ -883,7 +914,6 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
         raise HTTPException(400, "Выбери от 1 до 20 фото или видео")
     allowed = {"image/jpeg":".jpg", "image/png":".png", "image/webp":".webp", "image/gif":".gif",
                "video/mp4":".mp4", "video/webm":".webm", "video/quicktime":".mov"}
-    folder = BASE/"uploads"; folder.mkdir(exist_ok=True)
     results=[]
     for file in files:
         ext=allowed.get(file.content_type or "")
@@ -893,8 +923,8 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
         if not data or len(data)>20*1024*1024:
             raise HTTPException(413, "Каждый файл должен быть не больше 20 МБ")
         name=uuid.uuid4().hex+ext
-        (folder/name).write_bytes(data)
-        results.append({"url":WEBAPP_URL.rstrip("/")+"/uploads/"+name,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
+        url=upload_to_cloudinary(data, name, file.content_type or "")
+        results.append({"url":url,"type":"photo" if (file.content_type or "").startswith("image/") else "video"})
     audit(uid,"upload_media",f"files={len(results)}")
     return {"files":results}
 
@@ -915,7 +945,7 @@ async def upload_media_pool(category: str, files: list[UploadFile]=File(...), au
         raise HTTPException(400,"Выбери от 1 до 50 файлов")
     allowed={"image/jpeg":".jpg","image/png":".png","image/webp":".webp","image/gif":".gif",
              "video/mp4":".mp4","video/webm":".webm","video/quicktime":".mov"}
-    folder=BASE/"uploads"; folder.mkdir(exist_ok=True); saved=[]
+    saved=[]
     for file in files:
         ct=file.content_type or ""; ext=allowed.get(ct)
         if not ext: raise HTTPException(400,f"Формат файла {file.filename} не поддерживается")
@@ -925,8 +955,8 @@ async def upload_media_pool(category: str, files: list[UploadFile]=File(...), au
             raise HTTPException(400,"В разделы видео загружай только видео")
         data=await file.read()
         if not data or len(data)>20*1024*1024: raise HTTPException(413,"Каждый файл должен быть не больше 20 МБ")
-        name=uuid.uuid4().hex+ext; (folder/name).write_bytes(data)
-        url=WEBAPP_URL.rstrip("/")+"/uploads/"+name
+        name=uuid.uuid4().hex+ext
+        url=upload_to_cloudinary(data, name, ct)
         mt="photo" if ct.startswith("image/") else "video"
         with db() as c:
             cur=c.execute("INSERT INTO media_library(category,url,media_type) VALUES(?,?,?)",(category,url,mt))
