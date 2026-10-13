@@ -293,20 +293,19 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET private_discount_pct=10 WHERE telegram_id=?", (uid,))
             reward_message = "Скидка 10% на приват получена. Покажи это сообщение при оформлении привата."
         elif streak == 3:
-            circle = c.execute("SELECT * FROM prizes WHERE enabled=1 AND lower(prize_type) IN ('video_note','кружок') AND (delivery_value<>'' OR media_files<>'[]') ORDER BY RANDOM() LIMIT 1").fetchone()
+            # The circle is delivered as a real Telegram video-note message,
+            # which the user can forward to @XDarryanaX.
+            circle = c.execute(
+                "SELECT * FROM prizes WHERE enabled=1 AND lower(prize_type) IN ('video_note','кружок') "
+                "AND (COALESCE(delivery_value,'')<>'' OR COALESCE(media_files,'[]')<>'[]') "
+                "ORDER BY RANDOM() LIMIT 1"
+            ).fetchone()
             if circle:
-                value = circle['delivery_value'] or ''
-                try:
-                    payload=json.loads(value)
-                    if isinstance(payload,dict) and payload.get('media_files'):
-                        first=payload['media_files'][0]
-                        value=first.get('url') or first.get('file_id') or value
-                except Exception: pass
-                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,2)", (uid,circle['id'],circle['name'],circle['rarity'],circle['image'],circle['prize_type'],value))
                 delivery = dict(circle)
-                reward_message = "🎥 Твой ежедневный приз — кружок! Перешли это сообщение в личку модели @XDarryanaX."
+                reward_message = "🎥 Ежедневный приз — кружок. Перешли сообщение с кружком из чата бота в личку модели @XDarryanaX."
             else:
-                reward_message = "Кружок пока не настроен администратором. Этот день всё равно засчитан; напиши @XDarryanaX."
+                c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=MAX(0,daily_streak-1) WHERE telegram_id=?", (uid,))
+                raise HTTPException(503, "Ежедневный кружок пока не настроен. Попробуй позже.")
         elif streak == 4:
             c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
             reward_message = "🎰 Одно бесплатное вращение начислено!"
@@ -317,62 +316,129 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
             c.execute("UPDATE users SET private_discount_pct=25 WHERE telegram_id=?", (uid,))
             reward_message = "🏷️ Скидка 25% на приват получена. Покажи это сообщение при оформлении привата."
         else:
-            prize = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0 ORDER BY RANDOM() LIMIT 1").fetchone()
+            # Day 7: weighted random surprise from enabled prizes. Fallback is +3 spins.
+            candidates = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
+            total_weight = sum(max(0.0, float(p["weight"] or 0)) for p in candidates)
+            prize = None
+            if candidates and total_weight > 0:
+                target = secrets.SystemRandom().random() * total_weight
+                acc = 0.0
+                for candidate in candidates:
+                    acc += max(0.0, float(candidate["weight"] or 0))
+                    if target < acc:
+                        prize = candidate
+                        break
+                prize = prize or candidates[-1]
             if prize:
-                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,2)", (uid,prize['id'],prize['name'],prize['rarity'],prize['image'],prize['prize_type'],prize['delivery_value']))
+                media_files = json.loads(prize["media_files"] or "[]") if "media_files" in prize.keys() else []
+                delivery_value = (prize["delivery_value"] or "").strip()
+                if media_files:
+                    delivery_value = json.dumps({"media_files": media_files}, ensure_ascii=False)
+                c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,0,?,?,2)", (uid,prize['id'],prize['name'],prize['rarity'],prize['image'],prize['prize_type'],delivery_value))
                 delivery = dict(prize)
+                delivery["delivery_value"] = delivery_value
                 reward_message = f"🎁 Сюрприз дня: {prize['name']}! Приз отправлен в этот чат."
             else:
-                c.execute("UPDATE users SET spins=spins+1 WHERE telegram_id=?", (uid,))
-                reward_message = "🎰 Сюрприз дня: +1 бесплатное вращение!"
+                c.execute("UPDATE users SET spins=spins+3 WHERE telegram_id=?", (uid,))
+                reward_message = "🎰 Сюрприз дня: +3 бесплатных вращения!"
         balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()["spins"]
-    # Daily rewards are delivered to the user's bot chat, not only shown in the Mini App.
+    # Send daily rewards to the user's bot chat. For day 3, send the actual
+    # video-note message so the user can forward that message to the model.
     try:
         if streak == 3 and delivery:
-            value = (delivery.get('delivery_value') or '').strip()
-            kind = (delivery.get('prize_type') or '').lower()
-            if value:
-                try:
-                    payload=json.loads(value)
-                    if isinstance(payload,dict) and payload.get('media_files'):
-                        media=payload['media_files']
-                        note=next((x.get('url') or x.get('file_id') for x in media if isinstance(x,dict) and x.get('type') in ('video_note','кружок')),None)
-                        value=note or value
-                except Exception: pass
-                await bot.send_video_note(uid, value)
-            await bot.send_message(uid, "🎁 Ежедневный бонус: кружок! Перешли это сообщение в личку модели @XDarryanaX.")
-        elif streak == 7 and delivery:
-            value=(delivery.get('delivery_value') or '').strip()
-            kind=(delivery.get('prize_type') or 'text').lower()
-            payload=None
+            raw_value = (delivery.get("delivery_value") or "").strip()
+            media_items = []
             try:
-                parsed=json.loads(value)
-                if isinstance(parsed,dict) and isinstance(parsed.get('media_files'),list): payload=parsed['media_files']
-            except Exception: pass
-            if payload:
-                photos=[x.get('url') or x.get('file_id') for x in payload if isinstance(x,dict) and x.get('type') in ('photo','image') and (x.get('url') or x.get('file_id'))]
-                videos=[x.get('url') or x.get('file_id') for x in payload if isinstance(x,dict) and x.get('type')=='video' and (x.get('url') or x.get('file_id'))]
-                for p in photos:
-                    await bot.send_photo(uid,p,caption=f"🎁 Ежедневный приз: {delivery['name']}")
-                for v in videos:
-                    await bot.send_video(uid,v,caption=f"🎁 Ежедневный приз: {delivery['name']}")
-                if not photos and not videos: await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value}")
-            elif kind in ('photo','image','картинка','фото') and value:
-                await bot.send_photo(uid,value,caption=f"🎁 Ежедневный приз: {delivery['name']}")
-            elif kind in ('video','видео') and value:
-                await bot.send_video(uid,value,caption=f"🎁 Ежедневный приз: {delivery['name']}")
-            elif kind in ('video_note','кружок') and value:
-                await bot.send_video_note(uid,value)
-                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\nПерешли кружок в личку модели @XDarryanaX.")
-            elif kind in ('link','url','ссылка'):
-                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value}")
+                parsed = json.loads(raw_value)
+                if isinstance(parsed, dict) and isinstance(parsed.get("media_files"), list):
+                    media_items = parsed["media_files"]
+            except (ValueError, TypeError):
+                pass
+            if not media_items:
+                try:
+                    stored = json.loads(delivery.get("media_files") or "[]")
+                    if isinstance(stored, list):
+                        media_items = stored
+                except (ValueError, TypeError):
+                    pass
+            circle_value = None
+            for item in media_items:
+                if isinstance(item, dict) and str(item.get("type", "")).lower() in ("video_note", "кружок"):
+                    circle_value = item.get("url") or item.get("file_id")
+                    if circle_value:
+                        break
+            if not circle_value:
+                circle_value = raw_value
+            if not circle_value:
+                raise ValueError("Кружок не настроен: отсутствует файл или file_id")
+            await bot.send_video_note(uid, circle_value)
+            await bot.send_message(uid, "🎁 Ежедневный бонус · День 3/7\nПерешли именно сообщение с кружком выше в личные сообщения модели @XDarryanaX.")
+        elif streak == 7 and delivery:
+            raw_value = (delivery.get("delivery_value") or "").strip()
+            kind = (delivery.get("prize_type") or "text").lower()
+            media_items = []
+            try:
+                parsed = json.loads(raw_value)
+                if isinstance(parsed, dict) and isinstance(parsed.get("media_files"), list):
+                    media_items = parsed["media_files"]
+            except (ValueError, TypeError):
+                pass
+            if not media_items:
+                try:
+                    stored = json.loads(delivery.get("media_files") or "[]")
+                    if isinstance(stored, list):
+                        media_items = stored
+                except (ValueError, TypeError):
+                    pass
+            if media_items:
+                sent = 0
+                for item in media_items:
+                    if not isinstance(item, dict):
+                        continue
+                    file_value = item.get("url") or item.get("file_id")
+                    if not file_value:
+                        continue
+                    media_kind = str(item.get("type", "")).lower()
+                    caption = f"🎁 Ежедневный приз: {delivery['name']}" if sent == 0 else None
+                    if media_kind in ("photo", "image", "картинка", "фото"):
+                        await bot.send_photo(uid, file_value, caption=caption)
+                        sent += 1
+                    elif media_kind in ("video", "видео"):
+                        await bot.send_video(uid, file_value, caption=caption)
+                        sent += 1
+                    elif media_kind in ("video_note", "кружок"):
+                        await bot.send_video_note(uid, file_value)
+                        sent += 1
+                if not sent:
+                    raise ValueError("В настройках случайного приза не найдены отправляемые медиафайлы")
+            elif kind in ("photo", "image", "картинка", "фото") and raw_value:
+                await bot.send_photo(uid, raw_value, caption=f"🎁 Ежедневный приз: {delivery['name']}")
+            elif kind in ("video", "видео") and raw_value:
+                video_values = [part.strip() for line in raw_value.splitlines() for part in line.split(";") if part.strip()]
+                for index, video_value in enumerate(video_values):
+                    await bot.send_video(uid, video_value, caption=f"🎁 Ежедневный приз: {delivery['name']}" if index == 0 else None)
+            elif kind in ("video_note", "кружок") and raw_value:
+                await bot.send_video_note(uid, raw_value)
+                await bot.send_message(uid, f"🎁 Ежедневный приз: {delivery['name']}\nПерешли кружок в личку модели @XDarryanaX.")
+            elif kind in ("link", "url", "ссылка"):
+                await bot.send_message(uid, f"🎁 Ежедневный приз: {delivery['name']}\n{raw_value}")
             else:
-                await bot.send_message(uid,f"🎁 Ежедневный приз: {delivery['name']}\n{value or delivery.get('description') or 'Обратись к администратору для получения содержимого приза.'}")
+                await bot.send_message(uid, f"🎁 Ежедневный приз: {delivery['name']}\n{raw_value or delivery.get('description') or 'Содержимое приза не настроено.'}")
         else:
             await bot.send_message(uid, f"🎁 Ежедневный бонус · День {streak}/7\n\n{reward_message}")
     except Exception as exc:
-        # The bonus stays credited; surface a clear message in Mini App if bot delivery fails.
-        reward_message += "\n⚠️ Не получилось отправить сообщение в чат бота. Открой бота и нажми /start."
+        print(f"Daily bonus delivery failed for user {uid}, day {streak}: {exc}")
+        # Do not leave a failed circle bonus consumed. For day 7, put the surprise
+        # into the normal prize collection so the user can retry from the bot.
+        try:
+            with db() as c:
+                if streak == 3:
+                    c.execute("UPDATE users SET daily_claimed_at=NULL,daily_streak=MAX(0,daily_streak-1) WHERE telegram_id=? AND daily_claimed_at=?", (uid, now_iso))
+                elif streak == 7 and delivery:
+                    c.execute("UPDATE spins SET claimed=0 WHERE id=(SELECT id FROM spins WHERE telegram_id=? AND prize_id=? ORDER BY id DESC LIMIT 1)", (uid, delivery.get("id")))
+        except Exception as rollback_exc:
+            print(f"Could not recover failed daily reward for user {uid}: {rollback_exc}")
+        reward_message += "\n⚠️ Не получилось отправить бонус в чат бота. Для кружка попробуй забрать бонус ещё раз; если проблема повторится, напиши администратору."
     return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"daily_streak":streak,"message":f"День {streak}/7: {reward_message}"}
 
 @app.get("/api/prizes")
@@ -484,19 +550,26 @@ async def spin(authorization: str|None=Header(default=None)):
         wanted_count = int(match_count.group(1)) if match_count else 1
         valid_media = []
         for item in media_files:
-            if not isinstance(item, dict) or not str(item.get("url", "")).strip():
+            if not isinstance(item, dict):
+                continue
+            file_value = str(item.get("url") or item.get("file_id") or "").strip()
+            if not file_value:
                 continue
             media_type = str(item.get("type", "")).lower().strip()
-            if media_type == "image":
+            if media_type in {"image", "картинка", "фото"}:
                 media_type = "photo"
+            if media_type in {"видео"}:
+                media_type = "video"
             if media_type in {"photo", "video"}:
-                valid_media.append({"url": str(item["url"]).strip(), "type": media_type})
+                valid_media.append({"url": file_value, "type": media_type})
         if valid_media:
             # Select exactly the pack size, without duplicates. Never silently deliver a smaller pack.
             wants_video = "видео" in prize_name_norm or "video" in prize_name_norm
             matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
             if matching:
                 valid_media = matching
+            else:
+                raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа ({'видео' if wants_video else 'фото'}).")
             if len(valid_media) < wanted_count:
                 raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {wanted_count} файлов, прикреплено {len(valid_media)} подходящих.")
             valid_media = secrets.SystemRandom().sample(valid_media, wanted_count)
@@ -963,45 +1036,52 @@ async def claim_prize_for_user(uid: int, spin_id: int):
         if int(row["claimed"] or 0) >= 2:
             return False, "Этот приз уже открыт"
         value = str(row["delivery_value"] or "").strip()
-        if not value:
-            # Backward-compatible recovery for older wins created before media was
-            # copied into each spin row. Prefer the media attached to that exact prize.
-            prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
-            if prize:
-                value = str(prize["delivery_value"] or "").strip()
+        # For photo/video packs, the attached prize media is authoritative. Older
+        # spin rows may contain only the legacy single-file delivery_value.
+        prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
+        if prize:
+            name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
+            match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", name_norm)
+            wanted = int(match_count.group(1)) if match_count else 1
+            existing_media = []
+            try:
+                parsed_value = json.loads(value) if value else {}
+                if isinstance(parsed_value, dict) and isinstance(parsed_value.get("media_files"), list):
+                    existing_media = parsed_value["media_files"]
+            except (ValueError, TypeError):
+                pass
+            kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
+            existing_matching = [x for x in existing_media if isinstance(x, dict) and x.get("url") and ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+            if wanted > 1 and len(existing_matching) < wanted:
                 prize_media = []
                 try:
                     prize_media = json.loads(prize["media_files"] or "[]")
                 except (ValueError, TypeError):
                     prize_media = []
-                if not value and isinstance(prize_media, list) and prize_media:
-                    name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
-                    match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", name_norm)
-                    wanted = int(match_count.group(1)) if match_count else 1
-                    kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
-                    valid = [x for x in prize_media if isinstance(x, dict) and x.get("url") and x.get("type") in {"photo", "image", "video"}]
-                    matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
-                    if matching:
-                        valid = matching
-                    if valid:
-                        value = json.dumps({"media_files": secrets.SystemRandom().sample(valid, min(wanted, len(valid)))}, ensure_ascii=False)
-                if not value and str(prize["image"] or "").strip():
-                    value = json.dumps({"media_files":[{"url":str(prize["image"]).strip(),"type":"photo"}]}, ensure_ascii=False)
-                if not value:
-                    pool = str(prize["media_pool"] or "").strip()
-                    name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
-                    if not pool:
-                        if any(k in name_norm for k in ("видео с лицом", "video face", "видео без лица", "video noface")):
-                            pool = "video_face" if "лицом" in name_norm or "face" in name_norm else "video_noface"
-                        elif any(k in name_norm for k in ("фото", "фотограф", "photo", "picture")):
-                            pool = "photo"
-                    if pool:
-                        media_row = c.execute("SELECT url,media_type FROM media_library WHERE category=? ORDER BY RANDOM() LIMIT 1", (pool,)).fetchone()
-                        if media_row:
-                            value = json.dumps({"media_files":[{"url":media_row["url"],"type":media_row["media_type"]}]}, ensure_ascii=False)
-            if not value or value in {"[]", "{}", "null"}:
-                return False, "Для этого приза не настроено содержимое"
-            c.execute("UPDATE spins SET delivery_value=? WHERE id=? AND telegram_id=?", (value, spin_id, uid))
+                valid = [x for x in prize_media if isinstance(x, dict) and x.get("url") and x.get("type") in {"photo", "image", "video"}]
+                matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+                if matching:
+                    valid = matching
+                if len(valid) >= wanted:
+                    value = json.dumps({"media_files": secrets.SystemRandom().sample(valid, wanted)}, ensure_ascii=False)
+            if not value:
+                value = str(prize["delivery_value"] or "").strip()
+            if not value and str(prize["image"] or "").strip():
+                value = json.dumps({"media_files":[{"url":str(prize["image"]).strip(),"type":"photo"}]}, ensure_ascii=False)
+            if not value:
+                pool = str(prize["media_pool"] or "").strip()
+                if not pool:
+                    if any(k in name_norm for k in ("видео с лицом", "video face", "видео без лица", "video noface")):
+                        pool = "video_face" if "лицом" in name_norm or "face" in name_norm else "video_noface"
+                    elif any(k in name_norm for k in ("фото", "фотограф", "photo", "picture")):
+                        pool = "photo"
+                if pool:
+                    media_row = c.execute("SELECT url,media_type FROM media_library WHERE category=? ORDER BY RANDOM() LIMIT 1", (pool,)).fetchone()
+                    if media_row:
+                        value = json.dumps({"media_files":[{"url":media_row["url"],"type":media_row["media_type"]}]}, ensure_ascii=False)
+        if not value or value in {"[]", "{}", "null"}:
+            return False, "Для этого приза не настроено содержимое"
+        c.execute("UPDATE spins SET delivery_value=? WHERE id=? AND telegram_id=?", (value, spin_id, uid))
         c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=0", (spin_id, uid))
         if c.execute("SELECT changes() n").fetchone()["n"] != 1:
             return False, "Этот приз уже обработан"
@@ -1081,8 +1161,8 @@ async def open_prize(cb):
         except (ValueError, TypeError):
             pass
         if media_payload:
-            photos = [x["url"] for x in media_payload if isinstance(x, dict) and x.get("type") in {"photo", "image"} and x.get("url")]
-            videos = [x["url"] for x in media_payload if isinstance(x, dict) and x.get("type") == "video" and x.get("url")]
+            photos = [(x.get("url") or x.get("file_id")) for x in media_payload if isinstance(x, dict) and str(x.get("type", "")).lower() in {"photo", "image", "картинка", "фото"} and (x.get("url") or x.get("file_id"))]
+            videos = [(x.get("url") or x.get("file_id")) for x in media_payload if isinstance(x, dict) and str(x.get("type", "")).lower() in {"video", "видео"} and (x.get("url") or x.get("file_id"))]
             if not photos and not videos:
                 raise ValueError("В призе нет файлов для отправки")
             for start in range(0, len(photos), 10):
