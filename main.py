@@ -321,16 +321,19 @@ def download_from_b2(filename: str):
         raise HTTPException(status_code=503, detail="Backblaze B2 is not configured")
 
     try:
-        from io import BytesIO
+        import tempfile
         from b2sdk.v2 import InMemoryAccountInfo, B2Api
 
         info = InMemoryAccountInfo()
         b2_api = B2Api(info)
         b2_api.authorize_account("production", key_id, application_key)
         bucket = b2_api.get_bucket_by_name(bucket_name)
-        output = BytesIO()
-        bucket.download_file_by_name(filename).save_to(output)
-        return output.getvalue()
+
+        # b2sdk save_to() expects a filesystem path, not a BytesIO object.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = Path(temp_dir) / filename
+            bucket.download_file_by_name(filename).save_to(str(local_path))
+            return local_path.read_bytes()
     except HTTPException:
         raise
     except Exception as exc:
