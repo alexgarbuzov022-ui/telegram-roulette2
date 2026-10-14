@@ -1,10 +1,10 @@
 import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import Message, LabeledPrice, PreCheckoutQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, InputMediaPhoto, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -159,25 +159,20 @@ def init_db():
         # uploaded media are preserved; this migration is safe to run on every startup.
         starter_prizes = [
             ("photo1", "1 фото модели", "Одно фото из твоей коллекции. Загрузи фото в редакторе приза.", "", "Обычный", 50, 0, "media_group", "[]", "[]"),
-            ("photo3", "Набор из 3 фото", "Три разных фото модели. Добавь 3 файла в медиа приза.", "", "Обычный", 20, 0, "media_group", "[]", "[]"),
             ("photo5", "Набор из 5 фото", "Пять фото модели.", "", "Редкий", 10, 0, "media_group", "[]", "[]"),
             ("photo10", "Набор из 10 фото", "Десять фото модели.", "", "Редкий", 5, 0, "media_group", "[]", "[]"),
             ("video1", "Видео модели", "Одно видео. Добавь видео в медиа приза или укажи Telegram file_id.", "", "Редкий", 8, 0, "video", "", "[]"),
             ("video_exclusive", "Эксклюзивное видео", "Особое видео модели.", "", "Эпический", 3, 0, "video", "", "[]"),
             ("private_week", "Приватный канал — 1 неделя", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Эпический", 2, 0, "link", "", "[]"),
             ("private_month", "Приватный канал — 1 месяц", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 1, 0, "link", "", "[]"),
-            ("private_3months", "Приватный канал — 3 месяца", "Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Легендарный", 0.5, 0, "link", "", "[]"),
             ("private_forever", "Приватный канал — навсегда", "Самый редкий приз. Добавь ссылку-приглашение или инструкцию для выдачи.", "", "Мифический", 0.1, 0, "link", "", "[]"),
             ("private_discount10", "Скидка 10% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Обычный", 8, 0, "text", "", "[]"),
-            ("private_discount25", "Скидка 25% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Редкий", 3, 0, "text", "", "[]"),
             ("private_discount50", "Скидка 50% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Эпический", 1, 0, "text", "", "[]"),
             ("circle_dm", "Кружок в личные сообщения", "Добавь видео-кружок или file_id в медиа приза.", "", "Редкий", 3, 0, "video_note", "", "[]"),
             ("video_face", "Видео с лицом", "Добавь видео в медиа приза.", "", "Редкий", 4, 0, "video", "", "[]"),
-            ("video_no_face", "Видео без лица", "Добавь видео в медиа приза.", "", "Обычный", 7, 0, "video", "", "[]"),
             ("video_pack3", "Пакет из 3 видео", "Добавь три видео в медиа приза; бот отправит их все.", "", "Эпический", 1.5, 0, "media_group", "", "[]"),
             ("rating_member", "Оценка члена", "Администратор укажет способ получения/инструкцию в поле выдачи.", "", "Мифический", 0.1, 0, "text", "", "[]"),
             ("bonus_spin1", "+1 дополнительное вращение", "Вращение начисляется автоматически.", "", "Обычный", 12, 1, "spins", "", "[]"),
-            ("bonus_spin2", "+2 дополнительных вращения", "Вращения начисляются автоматически.", "", "Редкий", 5, 2, "spins", "", "[]"),
             ("bonus_spin3", "+3 дополнительных вращения", "Вращения начисляются автоматически.", "", "Эпический", 2, 3, "spins", "", "[]")        ]
         # Replace only the old bundled sample IDs, never arbitrary/custom prizes.
         legacy_ids = {"points5", "points10", "points25", "points100", "tryagain"}
@@ -186,6 +181,11 @@ def init_db():
         for prize in starter_prizes:
             c.execute("""INSERT OR IGNORE INTO prizes(id,name,description,image,rarity,weight,points,prize_type,delivery_value,media_files)
                          VALUES(?,?,?,?,?,?,?,?,?,?)""", prize)
+        # These five prizes were explicitly retired. Disable existing rows in Neon
+        # as well as omitting them from the starter list, without deleting user history.
+        retired_prize_ids = ("private_discount25", "private_3months", "photo3", "bonus_spin2", "video_no_face")
+        for retired_id in retired_prize_ids:
+            c.execute("UPDATE prizes SET enabled=0 WHERE id=?", (retired_id,))
 
 
     with db() as c:
@@ -574,12 +574,43 @@ async def daily_bonus(authorization: str|None=Header(default=None)):
         reward_message += "\n⚠️ Не получилось отправить бонус в чат бота. Для кружка попробуй забрать бонус ещё раз; если проблема повторится, напиши администратору."
     return {"ok":True,"spins":balance,"daily_claimed_at":now_iso,"daily_streak":streak,"message":f"День {streak}/7: {reward_message}"}
 
+RARITY_WEIGHTS = {
+    "обычный": 58.0, "обычная": 58.0, "common": 58.0,
+    "редкий": 30.0, "редкая": 30.0, "rare": 30.0,
+    "эпический": 8.0, "эпическая": 8.0, "эпическое": 8.0, "epic": 8.0,
+    "легендарный": 2.0, "легендарная": 2.0, "легендарное": 2.0, "legendary": 2.0,
+    "мифический": 2.0, "мифическая": 2.0, "мифическое": 2.0, "mythic": 2.0, "mythical": 2.0,
+}
+
+def rarity_key(prize):
+    return str(prize["rarity"] or "обычный").strip().lower().replace("ё", "е")
+
+def prize_chances(rows):
+    """Actual chance per prize: rarity tier first, then weight inside that tier."""
+    groups = {}
+    for row in rows:
+        weight = max(0.0, float(row["weight"] or 0))
+        if weight <= 0:
+            continue
+        key = rarity_key(row)
+        groups.setdefault(key, {"tier": RARITY_WEIGHTS.get(key, 70.0), "items": [], "total": 0.0})
+        groups[key]["items"].append((row, weight))
+        groups[key]["total"] += weight
+    total_tier = sum(group["tier"] for group in groups.values())
+    chances = {}
+    if total_tier <= 0:
+        return chances
+    for key, group in groups.items():
+        for row, weight in group["items"]:
+            chances[str(row["id"])] = (group["tier"] / total_tier) * (weight / group["total"]) * 100
+    return chances
+
 @app.get("/api/prizes")
 async def prizes():
     with db() as c:
         rows = c.execute("SELECT * FROM prizes WHERE enabled=1 ORDER BY weight DESC").fetchall()
-    total = sum(max(0,float(r["weight"])) for r in rows) or 1
-    return {"prizes":[{**prize_dict(r),"chance":round(max(0,float(r["weight"]))/total*100,3)} for r in rows]}
+    chances = prize_chances(rows)
+    return {"prizes":[{**prize_dict(r),"chance":round(chances.get(str(r["id"]), 0.0),3)} for r in rows]}
 
 @app.post("/api/create-invoice")
 async def create_invoice(payload: dict, authorization: str|None=Header(default=None)):
@@ -635,20 +666,34 @@ async def spin(authorization: str|None=Header(default=None)):
             raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
         rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
         if not rows: raise HTTPException(500, "Нет активных призов")
-        # Select across ALL enabled prizes using the same weights exposed by
-        # /api/prizes. Previously the code first selected a rarity tier and only
-        # then a prize, so the displayed per-prize chance (weight / all weights)
-        # did not match the real chance. This single weighted draw makes them match.
-        weighted_prizes = [(r, max(0.0, float(r["weight"] or 0))) for r in rows]
-        total_weight = sum(w for _, w in weighted_prizes)
-        if total_weight <= 0:
+        # Draw rarity tier first, then choose a prize by its weight inside that tier.
+        # /api/prizes uses the exact same formula to display the real odds.
+        groups = {}
+        for prize_row in rows:
+            prize_weight = max(0.0, float(prize_row["weight"] or 0))
+            if prize_weight <= 0:
+                continue
+            key = rarity_key(prize_row)
+            groups.setdefault(key, {"tier": RARITY_WEIGHTS.get(key, 70.0), "items": []})
+            groups[key]["items"].append((prize_row, prize_weight))
+        if not groups:
             raise HTTPException(500, "Нет активных призов с корректным весом")
-        n = secrets.randbelow(10**9) / 10**9 * total_weight
-        chosen = weighted_prizes[-1][0]
+        tier_total = sum(group["tier"] for group in groups.values())
+        draw = secrets.randbelow(10**9) / 10**9 * tier_total
+        chosen_group = next(iter(groups.values()))
         acc = 0.0
-        for prize_row, prize_weight in weighted_prizes:
+        for group in groups.values():
+            acc += group["tier"]
+            if draw < acc:
+                chosen_group = group
+                break
+        item_total = sum(weight for _, weight in chosen_group["items"])
+        draw = secrets.randbelow(10**9) / 10**9 * item_total
+        chosen = chosen_group["items"][-1][0]
+        acc = 0.0
+        for prize_row, prize_weight in chosen_group["items"]:
             acc += prize_weight
-            if n < acc:
+            if draw < acc:
                 chosen = prize_row
                 break
         if chosen["prize_type"] == "spins":
@@ -664,7 +709,7 @@ async def spin(authorization: str|None=Header(default=None)):
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
         # Each prize owns its own media. Infer pack size from the prize name.
         prize_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
-        match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", prize_name_norm)
+        match_count = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", prize_name_norm)
         wanted_count = int(match_count.group(1)) if match_count else 1
         valid_media = []
         for item in media_files:
@@ -868,11 +913,19 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
     media_files = payload.get("media_files", [])
     if not isinstance(media_files, list):
         raise HTTPException(400, "Список медиафайлов задан неверно")
-    media_json = json.dumps(
-        [{"url": str(x.get("url", ""))[:1000], "type": str(x.get("type", ""))[:20]}
-         for x in media_files if isinstance(x, dict) and x.get("url")],
-        ensure_ascii=False,
-    )
+    normalized_media = []
+    for item in media_files:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        raw_type = str(item.get("type", "")).strip().lower()
+        if raw_type in {"photo", "image", "картинка", "фото"} or raw_type.startswith("image/"):
+            media_type = "photo"
+        elif raw_type in {"video", "видео"} or raw_type.startswith("video/"):
+            media_type = "video"
+        else:
+            media_type = raw_type[:20]
+        normalized_media.append({"url": str(item.get("url", ""))[:1000], "type": media_type})
+    media_json = json.dumps(normalized_media, ensure_ascii=False)
     media_pool = str(payload.get("media_pool", ""))[:30]
     if media_pool not in {"", "photo", "video_noface", "video_face"}:
         raise HTTPException(400, "Неизвестная категория медиа")
@@ -1157,7 +1210,7 @@ async def claim_prize_for_user(uid: int, spin_id: int):
         prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
         if prize:
             name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
-            match_count = re.search(r"(?:набор\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф|видео|шт)", name_norm)
+            match_count = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", name_norm)
             wanted = int(match_count.group(1)) if match_count else 1
             existing_media = []
             try:
@@ -1196,7 +1249,13 @@ async def claim_prize_for_user(uid: int, spin_id: int):
                     if media_row:
                         value = json.dumps({"media_files":[{"url":media_row["url"],"type":media_row["media_type"]}]}, ensure_ascii=False)
         if not value or value in {"[]", "{}", "null"}:
-            return False, "Для этого приза не настроено содержимое"
+            # claimed=3 means unavailable/misconfigured; it is excluded from the
+            # user's pending prize list but remains in history for the admin.
+            c.execute(
+                "UPDATE spins SET claimed=3 WHERE id=? AND telegram_id=? AND claimed=0",
+                (spin_id, uid),
+            )
+            return False, "Этот приз недоступен: содержимое не настроено. Он убран из ожидающих; напиши администратору."
         c.execute("UPDATE spins SET delivery_value=? WHERE id=? AND telegram_id=?", (value, spin_id, uid))
         claim_update = c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=0", (spin_id, uid))
         if claim_update.rowcount != 1:
@@ -1240,6 +1299,34 @@ async def webapp_prize_claim(m: Message):
     except Exception:
         await m.answer("Не удалось подтвердить приз. Открой «🎁 Мои призы» и попробуй ещё раз.")
 
+async def prepare_telegram_media(value: str, index: int, fallback_ext: str):
+    """Download HTTP media ourselves, then upload bytes to Telegram instead of asking Telegram to fetch a URL."""
+    value = str(value or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        # Telegram file_id or another supported Telegram media identifier.
+        return value
+
+    import urllib.request
+    def _download():
+        request = urllib.request.Request(value, headers={"User-Agent": "TelegramRouletteBot/1.0"})
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = response.read(25 * 1024 * 1024 + 1)
+            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
+        if not data:
+            raise ValueError("Ссылка вернула пустой файл")
+        if len(data) > 25 * 1024 * 1024:
+            raise ValueError("Файл больше 25 МБ")
+        return data, content_type
+
+    data, content_type = await asyncio.to_thread(_download)
+    path = parsed.path.lower()
+    ext = Path(path).suffix
+    if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm", ".mov"}:
+        ext = ".mp4" if content_type.startswith("video/") else fallback_ext
+    return BufferedInputFile(data, filename=f"prize_{index}{ext}")
+
+
 @dp.callback_query(F.data.startswith("openprize:"))
 async def open_prize(cb):
     try:
@@ -1261,8 +1348,12 @@ async def open_prize(cb):
             return
         value = (row["delivery_value"] or "").strip()
         kind = (row["prize_type"] or "text").lower()
-        if not value:
-            await cb.answer("У этого приза не настроено содержимое", show_alert=True)
+        if not value or value in {"[]", "{}", "null"}:
+            c.execute(
+                "UPDATE spins SET claimed=3 WHERE id=? AND telegram_id=? AND claimed=1",
+                (spin_id, cb.from_user.id),
+            )
+            await cb.answer("Приз недоступен: содержимое не настроено. Он убран из ожидающих; напиши администратору.", show_alert=True)
             return
         open_update = c.execute("UPDATE spins SET claimed=2 WHERE id=? AND telegram_id=? AND claimed=1", (spin_id, cb.from_user.id))
         if open_update.rowcount != 1:
@@ -1277,19 +1368,42 @@ async def open_prize(cb):
         except (ValueError, TypeError):
             pass
         if media_payload:
-            photos = [(x.get("url") or x.get("file_id")) for x in media_payload if isinstance(x, dict) and str(x.get("type", "")).lower() in {"photo", "image", "картинка", "фото"} and (x.get("url") or x.get("file_id"))]
-            videos = [(x.get("url") or x.get("file_id")) for x in media_payload if isinstance(x, dict) and str(x.get("type", "")).lower() in {"video", "видео"} and (x.get("url") or x.get("file_id"))]
+            photos = []
+            videos = []
+            for item in media_payload:
+                if not isinstance(item, dict):
+                    continue
+                media_value = (item.get("url") or item.get("file_id") or "").strip()
+                media_type = str(item.get("type", "")).lower().strip()
+                if not media_value:
+                    continue
+                if media_type in {"photo", "image", "картинка", "фото"} or media_type.startswith("image/"):
+                    photos.append(media_value)
+                elif media_type in {"video", "видео"} or media_type.startswith("video/"):
+                    videos.append(media_value)
             if not photos and not videos:
                 raise ValueError("В призе нет файлов для отправки")
-            for start in range(0, len(photos), 10):
-                batch = photos[start:start+10]
+            # Fetch web URLs in the bot process and upload bytes to Telegram. This avoids
+            # Telegram being unable to fetch private/slow B2-backed media URLs itself.
+            prepared_photos = []
+            for photo_index, photo_url in enumerate(photos, start=1):
+                prepared_photos.append(await prepare_telegram_media(photo_url, photo_index, ".jpg"))
+            for start in range(0, len(prepared_photos), 10):
+                batch = prepared_photos[start:start+10]
                 if len(batch) == 1:
                     await bot.send_photo(cb.from_user.id, batch[0], caption=f"📸 {row['prize_label']}")
                 else:
-                    media = [InputMediaPhoto(media=url, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i, url in enumerate(batch)]
-                    await bot.send_media_group(cb.from_user.id, media)
-            for url in videos:
-                await bot.send_video(cb.from_user.id, url, caption=f"🎬 {row['prize_label']}")
+                    media = [InputMediaPhoto(media=file_obj, caption=(f"📸 {row['prize_label']}" if i == 0 and start == 0 else None)) for i, file_obj in enumerate(batch)]
+                    try:
+                        await bot.send_media_group(cb.from_user.id, media)
+                    except Exception as album_exc:
+                        print(f"send_media_group failed for spin {spin_id}: {type(album_exc).__name__}: {album_exc}")
+                        for photo_index, photo_file in enumerate(batch):
+                            caption = f"📸 {row['prize_label']}" if start == 0 and photo_index == 0 else None
+                            await bot.send_photo(cb.from_user.id, photo_file, caption=caption)
+            for video_index, url in enumerate(videos, start=1):
+                video_file = await prepare_telegram_media(url, video_index, ".mp4")
+                await bot.send_video(cb.from_user.id, video_file, caption=f"🎬 {row['prize_label']}" if video_index == 1 else None)
             if not photos and videos:
                 # The first video already carries the prize caption.
                 pass
@@ -1322,10 +1436,11 @@ async def open_prize(cb):
         except Exception:
             pass
         await cb.answer("Приз открыт!")
-    except Exception:
+    except Exception as exc:
+        print(f"Prize delivery failed for spin {spin_id}, user {cb.from_user.id}: {type(exc).__name__}: {exc}")
         with db() as c:
             c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
-        await cb.answer("Не удалось отправить приз. Проверь медиа и попробуй снова.", show_alert=True)
+        await cb.answer("Не удалось отправить один или несколько файлов. Приз сохранён для повторной попытки; администратор может проверить Render Logs.", show_alert=True)
 
 @dp.message(F.video | F.document)
 async def admin_video_file_id(m: Message):
