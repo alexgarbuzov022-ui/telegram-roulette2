@@ -635,48 +635,21 @@ async def spin(authorization: str|None=Header(default=None)):
             raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
         rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
         if not rows: raise HTTPException(500, "Нет активных призов")
-        # Rarity values requested by the user (70/45/25/10/3) cannot be
-        # literal percentages because they sum to 153%. Treat them as relative
-        # odds and normalize over the rarity tiers that actually have enabled prizes.
-        rarity_weights = {
-            "обычный": 58.0, "common": 58.0,
-            "редкий": 30.0, "rare": 30.0,
-            "эпический": 8.0, "эпическая": 8.0, "epic": 8.0,
-            "легендарный": 2.0, "легендарная": 2.0, "legendary": 2.0,
-            "мифический": 2.0, "мифическая": 2.0, "mythic": 2.0, "mythical": 2.0,
-        }
-        def rarity_key(prize):
-            return str(prize["rarity"] or "обычный").strip().lower()
-        groups = {}
-        for r in rows:
-            key = rarity_key(r)
-            group_weight = rarity_weights.get(key, 70.0)
-            groups.setdefault(key, {"rarity_weight": group_weight, "prizes": []})
-            prize_weight = max(0.0, float(r["weight"]))
-            if prize_weight > 0:
-                groups[key]["prizes"].append((r, prize_weight))
-        groups = {k: v for k, v in groups.items() if v["prizes"]}
-        if not groups:
+        # Select across ALL enabled prizes using the same weights exposed by
+        # /api/prizes. Previously the code first selected a rarity tier and only
+        # then a prize, so the displayed per-prize chance (weight / all weights)
+        # did not match the real chance. This single weighted draw makes them match.
+        weighted_prizes = [(r, max(0.0, float(r["weight"] or 0))) for r in rows]
+        total_weight = sum(w for _, w in weighted_prizes)
+        if total_weight <= 0:
             raise HTTPException(500, "Нет активных призов с корректным весом")
-        total_rarity_weight = sum(v["rarity_weight"] for v in groups.values())
-        n = secrets.randbelow(10**9)/10**9*total_rarity_weight
-        chosen_group = next(iter(groups.values()))
+        n = secrets.randbelow(10**9) / 10**9 * total_weight
+        chosen = weighted_prizes[-1][0]
         acc = 0.0
-        for group in groups.values():
-            acc += group["rarity_weight"]
+        for prize_row, prize_weight in weighted_prizes:
+            acc += prize_weight
             if n < acc:
-                chosen_group = group
-                break
-        # Existing per-prize weight still controls selection among prizes of the same rarity.
-        group_prizes = chosen_group["prizes"]
-        total_prize_weight = sum(w for _, w in group_prizes)
-        n = secrets.randbelow(10**9)/10**9*total_prize_weight
-        chosen = group_prizes[-1][0]
-        acc = 0.0
-        for r, w in group_prizes:
-            acc += w
-            if n < acc:
-                chosen = r
+                chosen = prize_row
                 break
         if chosen["prize_type"] == "spins":
             bonus_spins = max(0, int(chosen["points"] or 0))
