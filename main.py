@@ -698,18 +698,20 @@ async def spin(authorization: str|None=Header(default=None)):
                 break
         prize_type_norm = str(chosen["prize_type"] or "points").strip().lower()
         if prize_type_norm in {"spins", "extra_spin", "extra_spins"}:
-            bonus_spins = max(1, int(chosen["points"] or 0))
+            bonus_spins = max(1, int(chosen["points"] or 1))
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
         elif prize_type_norm in {"spin_discount", "discount_spins", "spin_discount_24h"}:
             discount_pct = max(1, min(90, int(chosen["points"] or 10)))
             expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-            c.execute("UPDATE users SET spin_discount_pct=?, spin_discount_expires_at=? WHERE telegram_id=?",
-                      (discount_pct, expires_at, uid))
+            c.execute("UPDATE users SET spins=CASE WHEN ? THEN spins ELSE spins-1 END, spin_discount_pct=?, spin_discount_expires_at=? WHERE telegram_id=?",
+                      (1 if admin_free else 0, discount_pct, expires_at, uid))
         elif admin_free:
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         delivery_payload = (chosen["delivery_value"] or "").strip()
+        if prize_type_norm in {"spins", "extra_spin", "extra_spins", "spin_discount", "discount_spins", "spin_discount_24h"}:
+            delivery_payload = ""
         # A category is inferred on the server too, so prize delivery does not depend
         # on the admin page having sent the hidden category field correctly.
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
@@ -802,12 +804,7 @@ async def spin(authorization: str|None=Header(default=None)):
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"spin_id":spin_id,"rarity":chosen["rarity"],"image":chosen["image"],
-            "points_awarded":chosen["points"],"description":chosen["description"],"prize_type":chosen["prize_type"],
-            "admin_free":admin_free,"claimable":claimable,
-            "reward_note": (f"Скидка {max(1, min(90, int(chosen['points'] or 10)))}% на покупку вращений действует 24 часа и применяется к одной покупке."
-                            if str(chosen["prize_type"] or "").lower() in {"spin_discount","discount_spins","spin_discount_24h"} else
-                            (f"Начислено вращений: {max(1, int(chosen['points'] or 0))}."
-                             if str(chosen["prize_type"] or "").lower() in {"spins","extra_spin","extra_spins"} else ""))}
+            "points_awarded":chosen["points"],"description":chosen["description"],"prize_type":prize_type_norm,"admin_free":admin_free,"claimable":claimable}
 
 @app.post("/api/claim-prize")
 async def api_claim_prize(payload: dict, authorization: str|None=Header(default=None)):
@@ -1058,6 +1055,124 @@ async def upload_media(files: list[UploadFile]=File(...), authorization: str|Non
     return {"files":results}
 
 
+@app.post("/api/admin/grant-spins")
+async def admin_grant_spins(payload: dict, authorization: str|None=Header(default=None)):
+    admin_uid = require_admin(authorization)
+    target = 0
+    raw_id = str(payload.get("telegram_id", "")).strip()
+    username = str(payload.get("username", "")).strip().lstrip("@")
+    if raw_id:
+        try:
+            target = int(raw_id)
+        except ValueError:
+            raise HTTPException(400, "Telegram ID должен быть числом")
+    elif username:
+        try:
+            target = int((await bot.get_chat("@" + username)).id)
+        except Exception:
+            raise HTTPException(400, "Не удалось найти пользователя по username. Попроси пользователя открыть бота и укажи Telegram ID.")
+    else:
+        raise HTTPException(400, "Укажи Telegram ID или username")
+    try:
+        amount = int(payload.get("amount", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Количество вращений должно быть числом")
+    if target <= 0 or amount < 1 or amount > 100000:
+        raise HTTPException(400, "Проверь Telegram ID и количество вращений (1–100000)")
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (target,))
+        c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (amount, target))
+        balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (target,)).fetchone()["spins"]
+    audit(admin_uid, "admin_grant_spins", f"target={target}; amount={amount}")
+    try:
+        await bot.send_message(target, f"🎰 Администратор начислил тебе {amount} вращений. Баланс: {balance}.")
+    except Exception:
+        pass
+    return {"ok": True, "telegram_id": target, "added": amount, "spins": balance}
+
+
+@app.post("/api/admin/grant-prize")
+async def admin_grant_prize(payload: dict, authorization: str|None=Header(default=None)):
+    admin_uid = require_admin(authorization)
+    target = 0
+    raw_id = str(payload.get("telegram_id", "")).strip()
+    username = str(payload.get("username", "")).strip().lstrip("@")
+    if raw_id:
+        try:
+            target = int(raw_id)
+        except ValueError:
+            raise HTTPException(400, "Telegram ID должен быть числом")
+    elif username:
+        try:
+            target = int((await bot.get_chat("@" + username)).id)
+        except Exception:
+            raise HTTPException(400, "Не удалось найти пользователя по username. Попроси пользователя открыть бота и укажи Telegram ID.")
+    else:
+        raise HTTPException(400, "Укажи Telegram ID или username")
+    prize_id = str(payload.get("prize_id", "")).strip()
+    if target <= 0 or not prize_id:
+        raise HTTPException(400, "Укажи корректный Telegram ID и ID приза")
+    with db() as c:
+        prize = c.execute("SELECT * FROM prizes WHERE id=?", (prize_id,)).fetchone()
+        if not prize:
+            raise HTTPException(404, "Приз с таким ID не найден")
+        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (target,))
+        kind = str(prize["prize_type"] or "points").lower()
+        if kind in {"spins", "extra_spin", "extra_spins"}:
+            amount = max(1, int(prize["points"] or 1))
+            c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (amount, target))
+            delivery = ""
+            claimed = 1
+        elif kind in {"spin_discount", "discount_spins", "spin_discount_24h"}:
+            pct = max(1, min(90, int(prize["points"] or 10)))
+            expiry = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+            c.execute("UPDATE users SET spin_discount_pct=?,spin_discount_expires_at=? WHERE telegram_id=?", (pct, expiry, target))
+            delivery = ""
+            claimed = 1
+        else:
+            delivery = str(prize["delivery_value"] or "").strip()
+            media = json.loads(prize["media_files"] or "[]")
+            if media:
+                delivery = json.dumps({"media_files": media}, ensure_ascii=False)
+            if not delivery and str(prize["image"] or "").strip():
+                delivery = json.dumps({"media_files":[{"url":str(prize["image"]).strip(),"type":"photo"}]}, ensure_ascii=False)
+            claimed = 0 if delivery or str(prize["media_pool"] or "").strip() else 1
+        cur = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (target, prize["id"], prize["name"], prize["rarity"], prize["image"], prize["points"], kind, delivery, claimed))
+        spin_id = cur.lastrowid
+    audit(admin_uid, "admin_grant_prize", f"target={target}; prize={prize_id}; spin={spin_id}")
+    notified = False
+    if claimed == 0:
+        try:
+            notified, _ = await claim_prize_for_user(target, spin_id)
+        except Exception:
+            notified = False
+    else:
+        try:
+            if kind in {"spins", "extra_spin", "extra_spins"}:
+                await bot.send_message(target, f"🎰 Администратор выдал приз «{prize['name']}»: начислено вращений {max(1, int(prize['points'] or 1))}.")
+            elif kind in {"spin_discount", "discount_spins", "spin_discount_24h"}:
+                await bot.send_message(target, f"🏷️ Администратор выдал приз «{prize['name']}». Скидка действует 24 часа на одну покупку вращений.")
+            else:
+                await bot.send_message(target, f"🎁 Администратор выдал приз «{prize['name']}». Он записан в историю.")
+        except Exception:
+            pass
+    return {"ok": True, "telegram_id": target, "prize_id": prize_id, "prize": prize["name"], "spin_id": spin_id, "notified": notified, "claimable": claimed == 0}
+
+
+@app.delete("/api/admin/media-pool/{media_id}")
+async def admin_delete_media_pool_item(media_id: int, authorization: str|None=Header(default=None)):
+    admin_uid = require_admin(authorization)
+    with db() as c:
+        row = c.execute("SELECT id,category FROM media_library WHERE id=?", (media_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Медиафайл не найден в медиатеке")
+        c.execute("DELETE FROM media_library WHERE id=?", (media_id,))
+    audit(admin_uid, "delete_media_pool_item", f"id={media_id}; category={row['category']}")
+    # Only remove the selected media-library entry. Existing prize references and B2 object remain intact.
+    return {"ok": True, "id": media_id}
+
+
 @app.get("/api/admin/media-pool")
 async def list_media_pool(authorization: str|None=Header(default=None)):
     require_admin(authorization)
@@ -1130,100 +1245,6 @@ async def reject_order(oid: str, authorization: str|None=Header(default=None)):
     try: await bot.send_message(row["telegram_id"], "❌ Оплата не подтверждена. Проверь чек/перевод и при необходимости отправь заявку повторно или свяжись с администратором.")
     except Exception: pass
     return {"ok":True,"status":"rejected"}
-
-@app.post("/api/admin/grant-spins")
-async def admin_grant_spins(payload: dict, authorization: str|None=Header(default=None)):
-    admin_uid = require_admin(authorization)
-    target = 0
-    raw_id = str(payload.get("telegram_id", "")).strip()
-    username = str(payload.get("username", "")).strip().lstrip("@")
-    if raw_id:
-        try:
-            target = int(raw_id)
-        except ValueError:
-            raise HTTPException(400, "Telegram ID должен быть числом")
-    elif username:
-        try:
-            target = int((await bot.get_chat("@" + username)).id)
-        except Exception:
-            raise HTTPException(400, "Не удалось найти пользователя по username. Укажи Telegram ID или попроси пользователя открыть бота.")
-    else:
-        raise HTTPException(400, "Укажи telegram_id или username")
-    try:
-        amount = int(payload.get("amount", 0))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "Количество вращений должно быть числом")
-    if target <= 0 or not 1 <= amount <= 100000:
-        raise HTTPException(400, "Проверь Telegram ID и количество вращений (1–100000)")
-    with db() as c:
-        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (target,))
-        c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (amount, target))
-        row = c.execute("SELECT spins FROM users WHERE telegram_id=?", (target,)).fetchone()
-        balance = int(row["spins"] or 0)
-    audit(admin_uid, "admin_grant_spins", f"target={target}; amount={amount}")
-    try:
-        await bot.send_message(target, f"🎰 Администратор начислил тебе {amount} вращений. Баланс: {balance}.")
-    except Exception:
-        pass
-    return {"ok": True, "telegram_id": target, "added": amount, "spins": balance}
-
-
-@app.post("/api/admin/grant-prize")
-async def admin_grant_prize(payload: dict, authorization: str|None=Header(default=None)):
-    admin_uid = require_admin(authorization)
-    target = 0
-    raw_id = str(payload.get("telegram_id", "")).strip()
-    username = str(payload.get("username", "")).strip().lstrip("@")
-    if raw_id:
-        try:
-            target = int(raw_id)
-        except ValueError:
-            raise HTTPException(400, "Telegram ID должен быть числом")
-    elif username:
-        try:
-            target = int((await bot.get_chat("@" + username)).id)
-        except Exception:
-            raise HTTPException(400, "Не удалось найти пользователя по username. Укажи Telegram ID или попроси пользователя открыть бота.")
-    else:
-        raise HTTPException(400, "Укажи telegram_id или username")
-    prize_id = str(payload.get("prize_id", "")).strip()
-    if target <= 0 or not prize_id:
-        raise HTTPException(400, "Укажи корректный Telegram ID и prize_id")
-    with db() as c:
-        prize = c.execute("SELECT * FROM prizes WHERE id=?", (prize_id,)).fetchone()
-        if not prize:
-            raise HTTPException(404, "Приз не найден")
-        c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (target,))
-        delivery = str(prize["delivery_value"] or "").strip()
-        media_files = json.loads(prize["media_files"] or "[]") if "media_files" in prize.keys() else []
-        if media_files:
-            delivery = json.dumps({"media_files": media_files}, ensure_ascii=False)
-        cur = c.execute(
-            "INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-            (target, prize["id"], prize["name"], prize["rarity"], prize["image"], prize["points"], prize["prize_type"], delivery, 0 if delivery else 1)
-        )
-        spin_id = cur.lastrowid
-    audit(admin_uid, "admin_grant_prize", f"target={target}; prize={prize_id}; spin={spin_id}")
-    try:
-        await bot.send_message(target, f"🎁 Тебе выдан приз: {prize['name']}." + (" Открой рулетку, чтобы забрать его." if delivery else ""))
-    except Exception:
-        pass
-    return {"ok": True, "telegram_id": target, "spin_id": spin_id, "prize_id": prize_id, "prize": prize["name"], "claimable": bool(delivery)}
-
-
-@app.delete("/api/admin/media-pool/{media_id}")
-async def admin_delete_media_pool_item(media_id: int, authorization: str|None=Header(default=None)):
-    admin_uid = require_admin(authorization)
-    with db() as c:
-        row = c.execute("SELECT id,category,url FROM media_library WHERE id=?", (media_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Медиафайл не найден в медиатеке")
-        c.execute("DELETE FROM media_library WHERE id=?", (media_id,))
-    audit(admin_uid, "delete_media_pool_item", f"id={media_id}; category={row['category']}")
-    # Intentionally remove only the selected library entry; do not delete the B2 object,
-    # which may still be referenced by an existing prize.
-    return {"ok": True, "id": media_id}
-
 
 @app.post("/api/admin/admins")
 async def add_admin(payload: dict, authorization: str|None=Header(default=None)):
