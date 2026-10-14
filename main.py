@@ -1,4 +1,4 @@
-import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re
+import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re, html
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
@@ -748,7 +748,20 @@ async def spin(authorization: str|None=Header(default=None)):
     try:
         for admin_id in admin_ids_all():
             try:
-                await bot.send_message(admin_id, f"🎉 Выигрыш в рулетке!\\nПользователь: {user_label} (ID: {uid})\\nПриз: {chosen['name']}\\nРедкость: {chosen['rarity']}\\nID приза: {chosen['id']}")
+                player_name = html.escape(str(user_label))
+                player_link = f'<a href="tg://user?id={uid}">{player_name}</a>'
+                prize_name = html.escape(str(chosen["name"]))
+                rarity_name = html.escape(str(chosen["rarity"]))
+                prize_id = html.escape(str(chosen["id"]))
+                notification = (
+                    "🎉 <b>НОВЫЙ ВЫИГРЫШ В РУЛЕТКЕ</b>\n\n"
+                    f"👤 <b>Игрок:</b> {player_link}\n"
+                    f"🆔 <b>Telegram ID:</b> <code>{uid}</code>\n\n"
+                    f"🎁 <b>Приз:</b> {prize_name}\n"
+                    f"💎 <b>Редкость:</b> {rarity_name}\n"
+                    f"🔖 <b>ID приза:</b> <code>{prize_id}</code>"
+                )
+                await bot.send_message(admin_id, notification, parse_mode="HTML")
             except Exception: pass
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
