@@ -337,8 +337,8 @@ def download_from_b2(filename: str):
     except HTTPException:
         raise
     except Exception as exc:
-        print(f"Backblaze B2 download failed for {filename}: {exc}")
-        raise HTTPException(status_code=404, detail="Файл не найден в Backblaze B2")
+        print(f"Backblaze B2 download failed for {filename}: {type(exc).__name__}: {exc!r}")
+        raise HTTPException(status_code=502, detail="Ошибка загрузки файла из Backblaze B2")
 
 @app.get("/")
 async def home(): return FileResponse(BASE / "web" / "index.html")
