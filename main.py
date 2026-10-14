@@ -155,6 +155,23 @@ def init_db():
             media_type TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
+        # Telegram IDs exceed the signed 32-bit INTEGER range. Upgrade existing
+        # Neon columns in place; PostgreSQL preserves values and primary keys.
+        if USE_POSTGRES:
+            for table, column in (
+                ("users", "telegram_id"), ("users", "referred_by"),
+                ("payments", "telegram_id"), ("spins", "telegram_id"),
+                ("audit", "admin_id"), ("orders", "telegram_id"),
+                ("admins", "telegram_id"), ("admins", "added_by"),
+                ("deleted_prizes", "deleted_by"),
+            ):
+                col = c.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name=? AND column_name=?",
+                    (table, column),
+                ).fetchone()
+                if col and str(col["data_type"]).lower() != "bigint":
+                    c.execute(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")
         # Add/update only the built-in starter prizes. Existing user-created prizes and
         # uploaded media are preserved; this migration is safe to run on every startup.
         starter_prizes = [
@@ -605,10 +622,95 @@ def prize_chances(rows):
             chances[str(row["id"])] = (group["tier"] / total_tier) * (weight / group["total"]) * 100
     return chances
 
+
+def prize_delivery_ready(prize, c):
+    """Do not let users win prizes whose configured reward cannot be delivered."""
+    kind = str(prize["prize_type"] or "text").strip().lower()
+    if kind in {"spins", "points"}:
+        return True  # Automatically credited by /api/spin.
+    value = str(prize["delivery_value"] or "").strip()
+    name_norm = str(prize["name"] or "").lower().replace("ё", "е")
+    value_media = None
+    if value and value not in {"[]", "{}", "null"}:
+        try:
+            parsed_value = json.loads(value)
+            if isinstance(parsed_value, dict) and isinstance(parsed_value.get("media_files"), list):
+                value_media = parsed_value["media_files"]
+            else:
+                # For ordinary text/link/direct photo/video prizes, any non-empty
+                # scalar value is usable. Media groups require actual media entries.
+                if kind not in {"media_group"}:
+                    return True
+        except (ValueError, TypeError):
+            if kind != "media_group":
+                return True
+    try:
+        files = json.loads(prize["media_files"] or "[]")
+        if not isinstance(files, list):
+            files = []
+    except (ValueError, TypeError):
+        files = []
+    if value_media:
+        files = value_media + files
+    count_match = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", name_norm)
+    needed = int(count_match.group(1)) if count_match else 1
+    wanted_type = "video_note" if kind in {"video_note", "кружок"} or "кружок" in name_norm else "video" if kind in {"video", "видео"} or "видео" in name_norm or "video" in name_norm else "photo"
+    matching_files = []
+    for item in files:
+        if not isinstance(item, dict) or not str(item.get("url") or item.get("file_id") or "").strip():
+            continue
+        mt = str(item.get("type") or "").lower().strip()
+        if mt in {"image", "картинка", "фото"} or mt.startswith("image/"):
+            mt = "photo"
+        elif mt in {"видео"} or mt.startswith("video/"):
+            mt = "video"
+        elif mt in {"кружок", "video note", "video-note"}:
+            mt = "video_note"
+        if mt == wanted_type:
+            matching_files.append(item)
+    if len(matching_files) >= needed:
+        return True
+    if str(prize["image"] or "").strip() and wanted_type == "photo" and kind in {"photo", "image", "картинка", "фото", "media_group"}:
+        return True
+    pool = str(prize["media_pool"] or "").strip() if "media_pool" in prize.keys() else ""
+    if not pool:
+        if any(k in name_norm for k in ("видео с лицом", "video face", "видео без лица", "video noface")):
+            pool = "video_face" if "лицом" in name_norm or "face" in name_norm else "video_noface"
+        elif any(k in name_norm for k in ("фото", "фотограф", "photo", "picture")):
+            pool = "photo"
+    if pool in {"photo", "video_noface", "video_face"}:
+        wanted_type = "video" if "video" in kind or "видео" in str(prize["name"] or "").lower() else "photo"
+        count_match = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", str(prize["name"] or "").lower().replace("ё", "е"))
+        needed = int(count_match.group(1)) if count_match else 1
+        rows = c.execute("SELECT media_type FROM media_library WHERE category=?", (pool,)).fetchall()
+        matching = 0
+        for item in rows:
+            mt = str(item["media_type"] or "").lower()
+            mt = "photo" if mt in {"image", "картинка", "фото"} or mt.startswith("image/") else "video" if mt in {"видео"} or mt.startswith("video/") else mt
+            if mt == wanted_type:
+                matching += 1
+        return matching >= needed
+    return False
+
+
+def eligible_prizes(c):
+    rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
+    ready = []
+    for row in rows:
+        try:
+            if prize_delivery_ready(row, c):
+                ready.append(row)
+            else:
+                print(f"Prize excluded from roulette: {row['id']} ({row['name']}) has no deliverable content")
+        except Exception as exc:
+            print(f"Prize validation failed for {row['id']}: {type(exc).__name__}: {exc}")
+    return ready
+
 @app.get("/api/prizes")
 async def prizes():
     with db() as c:
-        rows = c.execute("SELECT * FROM prizes WHERE enabled=1 ORDER BY weight DESC").fetchall()
+        rows = eligible_prizes(c)
+    rows = sorted(rows, key=lambda r: float(r["weight"] or 0), reverse=True)
     chances = prize_chances(rows)
     return {"prizes":[{**prize_dict(r),"chance":round(chances.get(str(r["id"]), 0.0),3)} for r in rows]}
 
@@ -664,8 +766,9 @@ async def spin(authorization: str|None=Header(default=None)):
         u = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()
         if not admin_free and (not u or u["spins"] < 1):
             raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
-        rows = c.execute("SELECT * FROM prizes WHERE enabled=1 AND weight>0").fetchall()
-        if not rows: raise HTTPException(500, "Нет активных призов")
+        rows = eligible_prizes(c)
+        if not rows:
+            raise HTTPException(503, "Пока нет призов с настроенным содержимым. Администратору нужно настроить ссылки или загрузить медиа.")
         # Draw rarity tier first, then choose a prize by its weight inside that tier.
         # /api/prizes uses the exact same formula to display the real odds.
         groups = {}
@@ -704,13 +807,13 @@ async def spin(authorization: str|None=Header(default=None)):
         else:
             c.execute("UPDATE users SET spins=spins-1,points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         delivery_payload = (chosen["delivery_value"] or "").strip()
-        # A category is inferred on the server too, so prize delivery does not depend
-        # on the admin page having sent the hidden category field correctly.
+        # Prefer files attached specifically to this prize. If none are attached,
+        # draw random files from the configured shared media pool.
         media_files = json.loads(chosen["media_files"] or "[]") if "media_files" in chosen.keys() else []
-        # Each prize owns its own media. Infer pack size from the prize name.
         prize_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
         match_count = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", prize_name_norm)
         wanted_count = int(match_count.group(1)) if match_count else 1
+
         valid_media = []
         for item in media_files:
             if not isinstance(item, dict):
@@ -719,30 +822,64 @@ async def spin(authorization: str|None=Header(default=None)):
             if not file_value:
                 continue
             media_type = str(item.get("type", "")).lower().strip()
-            if media_type in {"image", "картинка", "фото"}:
+            if media_type in {"image", "картинка", "фото"} or media_type.startswith("image/"):
                 media_type = "photo"
-            if media_type in {"видео"}:
+            elif media_type in {"видео"} or media_type.startswith("video/"):
                 media_type = "video"
-            if media_type in {"photo", "video"}:
+            elif media_type in {"кружок", "video note", "video-note"}:
+                media_type = "video_note"
+            if media_type in {"photo", "video", "video_note"}:
                 valid_media.append({"url": file_value, "type": media_type})
-        if valid_media:
-            # Select exactly the pack size, without duplicates. Never silently deliver a smaller pack.
-            wants_video = "видео" in prize_name_norm or "video" in prize_name_norm
-            matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
-            if matching:
-                valid_media = matching
-            else:
-                raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа ({'видео' if wants_video else 'фото'}).")
-            if len(valid_media) < wanted_count:
-                raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {wanted_count} файлов, прикреплено {len(valid_media)} подходящих.")
-            valid_media = secrets.SystemRandom().sample(valid_media, wanted_count)
-            delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
-        elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
-            delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
-        elif delivery_payload in {"[]", "{}", "null"}:
-            delivery_payload = ""
+
+        wants_video_note = str(chosen["prize_type"] or "").lower() in {"video_note", "кружок"} or "кружок" in prize_name_norm
+        wants_video = "видео" in prize_name_norm or "video" in prize_name_norm
+        wanted_type = "video_note" if wants_video_note else "video" if wants_video else "photo"
+        matching = [m for m in valid_media if m["type"] == wanted_type]
+
+        # If the prize has its own media, randomly choose the requested number
+        # from that set on every spin (without duplicates in a single pack).
+        if matching and len(matching) >= wanted_count:
+            selected_media = secrets.SystemRandom().sample(matching, wanted_count)
+            delivery_payload = json.dumps({"media_files": selected_media}, ensure_ascii=False)
+        else:
+            # If the prize-specific set is incomplete, fall back to its shared pool
+            # instead of letting an unopenable prize block the spin.
+            # Explicit media_pool wins over a legacy fixed delivery_value/image.
+            pool = str(chosen["media_pool"] or "").strip() if "media_pool" in chosen.keys() else ""
+            if not pool:
+                if any(k in prize_name_norm for k in ("видео с лицом", "video face", "видео без лица", "video noface")):
+                    pool = "video_face" if "лицом" in prize_name_norm or "face" in prize_name_norm else "video_noface"
+                elif any(k in prize_name_norm for k in ("фото", "фотограф", "photo", "picture")):
+                    pool = "photo"
+            pool = pool if pool in {"photo", "video_noface", "video_face"} else ""
+            pooled_media = []
+            if pool:
+                pool_rows = c.execute(
+                    "SELECT url, media_type FROM media_library WHERE category=?",
+                    (pool,),
+                ).fetchall()
+                for media_row in pool_rows:
+                    media_type = str(media_row["media_type"] or "").lower().strip()
+                    if media_type in {"image", "картинка", "фото"} or media_type.startswith("image/"):
+                        media_type = "photo"
+                    elif media_type in {"видео"} or media_type.startswith("video/"):
+                        media_type = "video"
+                    if media_row["url"] and media_type == wanted_type:
+                        pooled_media.append({"url": str(media_row["url"]).strip(), "type": media_type})
+            if pooled_media:
+                if len(pooled_media) < wanted_count:
+                    raise HTTPException(400, f"В медиатеке категории «{pool}» нужно {wanted_count} подходящих файлов, найдено {len(pooled_media)}.")
+                selected_media = secrets.SystemRandom().sample(pooled_media, wanted_count)
+                delivery_payload = json.dumps({"media_files": selected_media}, ensure_ascii=False)
+            elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
+                # Legacy fallback: a single fixed image if no pool/media was configured.
+                delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
+            elif delivery_payload in {"[]", "{}", "null"}:
+                delivery_payload = ""
+        auto_awarded = str(chosen["prize_type"] or "").lower() in {"spins", "points"}
+        initial_claimed = 2 if auto_awarded else 0
         spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,initial_claimed))
         spin_id = spin_cursor.lastrowid
     # Notify all configured admins about every win (including wins by admins).
     try:
@@ -766,7 +903,7 @@ async def spin(authorization: str|None=Header(default=None)):
     except Exception: pass
     claimable = bool(str(delivery_payload or "").strip())
     return {"prize":chosen["name"],"prize_id":chosen["id"],"spin_id":spin_id,"rarity":chosen["rarity"],"image":chosen["image"],
-            "points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
+            "prize_type":chosen["prize_type"],"points_awarded":chosen["points"],"description":chosen["description"],"admin_free":admin_free,"claimable":claimable}
 
 @app.post("/api/claim-prize")
 async def api_claim_prize(payload: dict, authorization: str|None=Header(default=None)):
@@ -1354,6 +1491,15 @@ async def open_prize(cb):
             await cb.answer("Приз не найден", show_alert=True)
             return
         if int(row["claimed"] or 0) == 2:
+            # A stale button can remain in an older Telegram message. Remove that
+            # button when it is tapped so the user cannot mistake it for a new prize.
+            try:
+                await cb.message.edit_text(
+                    f"✅ Этот приз уже был открыт: {row['prize_label']}. Повторно получить его нельзя.",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
             await cb.answer("Этот приз уже открыт", show_alert=True)
             return
         if int(row["claimed"] or 0) != 1:
@@ -1383,6 +1529,7 @@ async def open_prize(cb):
         if media_payload:
             photos = []
             videos = []
+            video_notes = []
             for item in media_payload:
                 if not isinstance(item, dict):
                     continue
@@ -1394,7 +1541,9 @@ async def open_prize(cb):
                     photos.append(media_value)
                 elif media_type in {"video", "видео"} or media_type.startswith("video/"):
                     videos.append(media_value)
-            if not photos and not videos:
+                elif media_type in {"video_note", "кружок"}:
+                    video_notes.append(media_value)
+            if not photos and not videos and not video_notes:
                 raise ValueError("В призе нет файлов для отправки")
             # Fetch web URLs in the bot process and upload bytes to Telegram. This avoids
             # Telegram being unable to fetch private/slow B2-backed media URLs itself.
@@ -1417,13 +1566,14 @@ async def open_prize(cb):
             for video_index, url in enumerate(videos, start=1):
                 video_file = await prepare_telegram_media(url, video_index, ".mp4")
                 await bot.send_video(cb.from_user.id, video_file, caption=f"🎬 {row['prize_label']}" if video_index == 1 else None)
-            if not photos and videos:
-                # The first video already carries the prize caption.
-                pass
-            elif photos and videos:
+            for note_value in video_notes:
+                note_file = await prepare_telegram_media(note_value, 1, ".mp4")
+                await bot.send_video_note(cb.from_user.id, note_file)
+            if photos and (videos or video_notes):
                 await bot.send_message(cb.from_user.id, f"🎉 Приз открыт: {row['prize_label']}")
         elif kind in {"photo", "image", "картинка", "фото"}:
-            await bot.send_photo(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
+            photo_file = await prepare_telegram_media(value, 1, ".jpg")
+            await bot.send_photo(cb.from_user.id, photo_file, caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video", "видео"}:
             # Поддерживаем несколько URL или Telegram file_id: по одному на строку
             # (также можно разделять точкой с запятой). Не делим по пробелам,
@@ -1433,9 +1583,11 @@ async def open_prize(cb):
                 raise ValueError("Не указаны ссылки на видео")
             for index, video_value in enumerate(video_values):
                 caption = f"🎉 Твой приз: {row['prize_label']}" if index == 0 else None
-                await bot.send_video(cb.from_user.id, video_value, caption=caption)
+                video_file = await prepare_telegram_media(video_value, index + 1, ".mp4")
+                await bot.send_video(cb.from_user.id, video_file, caption=caption)
         elif kind in {"video_note", "кружок"}:
-            await bot.send_video_note(cb.from_user.id, value)
+            note_file = await prepare_telegram_media(value, 1, ".mp4")
+            await bot.send_video_note(cb.from_user.id, note_file)
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n\nЕсли это бонусный кружок, перешли сообщение с кружком в личку модели @XDarryanaX.")
         elif kind in {"link", "url", "ссылка"}:
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n{value}", disable_web_page_preview=False)
@@ -1450,10 +1602,27 @@ async def open_prize(cb):
             pass
         await cb.answer("Приз открыт!")
     except Exception as exc:
-        print(f"Prize delivery failed for spin {spin_id}, user {cb.from_user.id}: {type(exc).__name__}: {exc}")
+        # If delivery fails, remove the prize from the user's pending/openable list.
+        # Keep the database row (claimed=3) for history and admin diagnostics, and
+        # never make it claimable again automatically: Telegram may have delivered
+        # some files before another file failed.
         with db() as c:
-            c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
-        await cb.answer("Не удалось отправить один или несколько файлов. Приз сохранён для повторной попытки; администратор может проверить Render Logs.", show_alert=True)
+            c.execute(
+                "UPDATE spins SET claimed=3 WHERE id=? AND telegram_id=? AND claimed=2",
+                (spin_id, cb.from_user.id),
+            )
+        print(f"Prize delivery failed for spin {spin_id}, user {cb.from_user.id}: {type(exc).__name__}: {exc}. Prize removed from pending list (claimed=3).")
+        try:
+            await cb.message.edit_text(
+                f"🗑️ Приз «{row['prize_label']}» удалён из списка: его не удалось полностью открыть. Если часть файлов уже пришла, повторной выдачи не будет. Если считаешь, что это ошибка, напиши администратору и укажи ID {spin_id}.",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        try:
+            await cb.answer("Приз удалён из списка: открыть его не удалось.", show_alert=True)
+        except Exception:
+            pass
 
 @dp.message(F.video | F.document)
 async def admin_video_file_id(m: Message):
