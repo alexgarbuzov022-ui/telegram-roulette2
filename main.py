@@ -958,7 +958,7 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
         raise HTTPException(400, "Список медиафайлов задан неверно")
     normalized_media = []
     for item in media_files:
-        if not isinstance(item, dict) or not item.get("url"):
+        if not isinstance(item, dict) or not (item.get("url") or item.get("file_id")):
             continue
         raw_type = str(item.get("type", "")).strip().lower()
         if raw_type in {"photo", "image", "картинка", "фото"} or raw_type.startswith("image/"):
@@ -967,7 +967,8 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
             media_type = "video"
         else:
             media_type = raw_type[:20]
-        normalized_media.append({"url": str(item.get("url", ""))[:1000], "type": media_type})
+        media_value = str(item.get("url") or item.get("file_id") or "").strip()
+        normalized_media.append({"url": media_value[:1000], "type": media_type})
     media_json = json.dumps(normalized_media, ensure_ascii=False)
     media_pool = str(payload.get("media_pool", ""))[:30]
     if media_pool not in {"", "photo", "video_noface", "video_face"}:
@@ -984,6 +985,75 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
              1 if payload.get("enabled", True) else 0, media_pool))
     audit(uid, "save_prize", f"{pid}: {name}; weight={weight}; rarity={rarity}; media={len(media_files)}")
     return {"ok": True, "id": pid}
+
+
+async def resolve_admin_target(target: str) -> int:
+    """Resolve a Telegram numeric ID or @username; usernames require Telegram to resolve the chat."""
+    raw = str(target or "").strip()
+    if not raw:
+        raise HTTPException(400, "Укажи Telegram ID или @username")
+    if raw.isdigit():
+        return int(raw)
+    username = raw.lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+        raise HTTPException(400, "Укажи корректный Telegram ID или @username")
+    try:
+        chat = await bot.get_chat("@" + username)
+        return int(chat.id)
+    except Exception as exc:
+        raise HTTPException(400, "Не удалось найти пользователя по username. Укажи числовой Telegram ID; пользователь должен хотя бы раз запустить бота.") from exc
+
+
+@app.post("/api/admin/grant-spins")
+async def admin_grant_spins(payload: dict, authorization: str|None=Header(default=None)):
+    admin_id = require_admin(authorization)
+    target_id = await resolve_admin_target(payload.get("user", payload.get("telegram_id", "")))
+    try:
+        amount = int(payload.get("amount", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Количество вращений должно быть целым числом")
+    if amount < 1 or amount > 100000:
+        raise HTTPException(400, "Количество вращений должно быть от 1 до 100000")
+    with db() as c:
+        c.execute("INSERT INTO users(telegram_id) VALUES(?) ON CONFLICT(telegram_id) DO NOTHING", (target_id,))
+        c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (amount, target_id))
+        balance = c.execute("SELECT spins FROM users WHERE telegram_id=?", (target_id,)).fetchone()["spins"]
+    try:
+        await bot.send_message(target_id, f"🎰 Администратор начислил тебе {amount} вращений. Текущий баланс: {balance}.")
+    except Exception as exc:
+        print(f"Could not notify user {target_id} about granted spins: {type(exc).__name__}: {exc}")
+    audit(admin_id, "grant_spins", f"user={target_id}; amount={amount}; balance={balance}")
+    return {"ok": True, "telegram_id": target_id, "added": amount, "balance": balance}
+
+
+@app.post("/api/admin/grant-prize")
+async def admin_grant_prize(payload: dict, authorization: str|None=Header(default=None)):
+    admin_id = require_admin(authorization)
+    target_id = await resolve_admin_target(payload.get("user", payload.get("telegram_id", "")))
+    prize_id = str(payload.get("prize_id", "")).strip()
+    if not prize_id:
+        raise HTTPException(400, "Выбери приз")
+    with db() as c:
+        prize = c.execute("SELECT * FROM prizes WHERE id=?", (prize_id,)).fetchone()
+        if not prize:
+            raise HTTPException(404, "Выбранный приз не найден")
+        c.execute("INSERT INTO users(telegram_id) VALUES(?) ON CONFLICT(telegram_id) DO NOTHING", (target_id,))
+        cur = c.execute(
+            """INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed)
+               VALUES(?,?,?,?,?,?,?, ?,0)""",
+            (target_id, prize["id"], prize["name"], prize["rarity"], prize["image"], prize["points"],
+             prize["prize_type"], str(prize["delivery_value"] or "")))
+        spin_id = cur.lastrowid
+    try:
+        ok, message = await claim_prize_for_user(target_id, int(spin_id))
+        if not ok:
+            raise RuntimeError(message)
+    except Exception as exc:
+        print(f"Could not notify user {target_id} about granted prize {prize_id}: {type(exc).__name__}: {exc}")
+        raise HTTPException(502, "Приз создан, но уведомление не отправилось. Проверь, что пользователь запускал бота, затем проверь «Мои призы».")
+    audit(admin_id, "grant_prize", f"user={target_id}; prize={prize_id}; spin={spin_id}")
+    return {"ok": True, "telegram_id": target_id, "prize_id": prize_id, "spin_id": spin_id}
+
 
 @app.delete("/api/admin/prizes/{pid}")
 async def delete_prize(pid: str, authorization: str|None=Header(default=None)):
@@ -1264,18 +1334,41 @@ async def claim_prize_for_user(uid: int, spin_id: int):
                 pass
             kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
             existing_matching = [x for x in existing_media if isinstance(x, dict) and x.get("url") and ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
-            if wanted > 1 and len(existing_matching) < wanted:
+            prize_media = []
+            try:
+                prize_media = json.loads(prize["media_files"] or "[]")
+            except (ValueError, TypeError):
                 prize_media = []
+            valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and x.get("type") in {"photo", "image", "video"}]
+            matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+            if matching:
+                valid = matching
+
+            # For video prizes, media_files is the preferred pool. If none was
+            # uploaded, allow multiple Telegram file_ids / URLs in delivery_value,
+            # one per line or separated by semicolons. Select randomly per win.
+            raw_delivery = str(prize["delivery_value"] or "").strip()
+            if kind_wanted == "video" and not valid and raw_delivery:
+                has_media_payload = False
                 try:
-                    prize_media = json.loads(prize["media_files"] or "[]")
+                    parsed_delivery = json.loads(raw_delivery)
+                    has_media_payload = isinstance(parsed_delivery, dict) and isinstance(parsed_delivery.get("media_files"), list)
+                    if has_media_payload:
+                        valid = [
+                            {"url": str(x.get("url") or x.get("file_id") or "").strip(), "type": "video"}
+                            for x in parsed_delivery["media_files"]
+                            if isinstance(x, dict) and str(x.get("url") or x.get("file_id") or "").strip()
+                            and str(x.get("type") or "video").lower() in {"video", "видео"}
+                        ]
                 except (ValueError, TypeError):
-                    prize_media = []
-                valid = [x for x in prize_media if isinstance(x, dict) and x.get("url") and x.get("type") in {"photo", "image", "video"}]
-                matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
-                if matching:
-                    valid = matching
-                if len(valid) >= wanted:
-                    value = json.dumps({"media_files": secrets.SystemRandom().sample(valid, wanted)}, ensure_ascii=False)
+                    pass
+                if not valid and not has_media_payload:
+                    candidates = [part.strip() for line in raw_delivery.splitlines() for part in line.split(";") if part.strip()]
+                    valid = [{"url": item, "type": "video"} for item in candidates]
+            if valid and (wanted > 1 or kind_wanted == "video"):
+                pick_count = min(wanted, len(valid)) if wanted > 1 else 1
+                chosen_media = secrets.SystemRandom().sample(valid, pick_count)
+                value = json.dumps({"media_files": chosen_media}, ensure_ascii=False)
             if not value:
                 value = str(prize["delivery_value"] or "").strip()
             if not value and str(prize["image"] or "").strip():
