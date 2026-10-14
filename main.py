@@ -386,7 +386,8 @@ async def me(authorization: str|None=Header(default=None)):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
         u = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
-        hist = c.execute("SELECT prize_label,rarity,image,created_at,prize_type,claimed FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
+        # Keep every win in chronological order so the profile matches the order in which prizes were won.
+        hist = c.execute("SELECT prize_label,rarity,image,created_at,prize_type,claimed FROM spins WHERE telegram_id=? ORDER BY id ASC", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
     bot_info = await bot.get_me()
