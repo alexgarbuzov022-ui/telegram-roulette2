@@ -1323,8 +1323,13 @@ async def claim_prize_for_user(uid: int, spin_id: int):
         prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
         if prize:
             name_norm = str(prize["name"] or row["prize_label"] or "").lower().replace("ё", "е")
-            match_count = re.search(r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)", name_norm)
-            wanted = int(match_count.group(1)) if match_count else 1
+            # Accept both digits and Russian number words (e.g. "пакет из трех видео").
+            match_count = re.search(
+                r"(?:(?:набор|пакет)\s+из\s+)?(10|5|3|1|десяти|пяти|трех|одного|одна|один)\s*(?:фото|фотограф\w*|фотк\w*|видео|видос\w*|шт)",
+                name_norm,
+            )
+            count_token = match_count.group(1) if match_count else "1"
+            wanted = {"десяти": 10, "пяти": 5, "трех": 3, "одного": 1, "одна": 1, "один": 1}.get(count_token, int(count_token) if count_token.isdigit() else 1)
             existing_media = []
             try:
                 parsed_value = json.loads(value) if value else {}
@@ -1574,9 +1579,18 @@ async def open_prize(cb):
         await cb.answer("Приз открыт!")
     except Exception as exc:
         print(f"Prize delivery failed for spin {spin_id}, user {cb.from_user.id}: {type(exc).__name__}: {exc}")
+        # The user asked not to leave broken gifts hanging in the pending list.
+        # Keep the history row for admins, but mark the gift unavailable/consumed.
         with db() as c:
-            c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
-        await cb.answer("Не удалось отправить один или несколько файлов. Приз сохранён для повторной попытки; администратор может проверить Render Logs.", show_alert=True)
+            c.execute("UPDATE spins SET claimed=3 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
+        try:
+            await cb.message.edit_text("⚠️ Приз закрыт: не удалось отправить содержимое. Он убран из ожидающих; напиши администратору.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🎰 Крутить", web_app=WebAppInfo(url=WEBAPP_URL)),
+                InlineKeyboardButton(text="🎁 Мои призы", callback_data="myprizes")
+            ]]))
+        except Exception:
+            pass
+        await cb.answer("Приз закрыт и убран из ожидающих: отправка не удалась.", show_alert=True)
 
 @dp.message(F.video | F.document)
 async def admin_video_file_id(m: Message):
