@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import re
+import threading
 from datetime import datetime, timezone, timedelta
 import uvicorn
 
@@ -268,11 +269,11 @@ async def notify_admins_new_user(channel, telegram_id, username=None, first_name
     username_text = f"@{html.escape(username)}" if username else "не указан"
     name_text = html.escape(first_name or "Не указано")
     message = (
-        "🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ</b>\\n"
-        "━━━━━━━━━━━━━━━━━━\\n"
-        f"👤 <b>{name_text}</b>\\n"
-        f"🔗 {username_text}\\n"
-        f"🆔 <code>{telegram_id}</code>\\n\\n"
+        "🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>{name_text}</b>\n"
+        f"🔗 {username_text}\n"
+        f"🆔 <code>{telegram_id}</code>\n\n"
         f"📍 <b>Первый вход:</b> {html.escape(channel)}"
     )
     for admin_id in admin_ids_all():
@@ -288,13 +289,13 @@ async def notify_admins_star_payment(user, total_amount, spins_added):
     first_name = html.escape(getattr(user, "full_name", None) or "Не указано")
     paid_at = datetime.now(timezone.utc).strftime("%d.%m.%Y в %H:%M UTC")
     message = (
-        "⭐ <b>НОВАЯ ОПЛАТА STARS</b>\\n"
-        "━━━━━━━━━━━━━━━━━━\\n"
-        f"👤 <b>{first_name}</b>\\n"
-        f"🔗 {username_text}\\n"
-        f"🆔 <code>{user.id}</code>\\n\\n"
-        f"💰 <b>Оплачено:</b> {total_amount} ⭐\\n"
-        f"🎟 <b>Начислено вращений:</b> {spins_added}\\n"
+        "⭐ <b>НОВАЯ ОПЛАТА STARS</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>{first_name}</b>\n"
+        f"🔗 {username_text}\n"
+        f"🆔 <code>{user.id}</code>\n\n"
+        f"💰 <b>Оплачено:</b> {total_amount} ⭐\n"
+        f"🎟 <b>Начислено вращений:</b> {spins_added}\n"
         f"🕒 <b>Время:</b> {paid_at}"
     )
     for admin_id in admin_ids_all():
@@ -322,30 +323,56 @@ def prize_dict(r):
             "enabled":bool(r["enabled"])}
 
 
-def upload_to_b2(data: bytes, filename: str, content_type: str):
-    """Store prize media in the private Backblaze B2 bucket."""
+# Reuse the same authenticated B2 client for the life of this process.
+_B2_LOCK = threading.Lock()
+_B2_CLIENT = None
+_B2_CLIENT_CONFIG = None
+_B2_MEDIA_CACHE_DIR = Path(os.getenv("B2_MEDIA_CACHE_DIR", "/tmp/roulette-b2-media-cache"))
+_B2_MEDIA_CACHE_TTL = int(os.getenv("B2_MEDIA_CACHE_TTL_SECONDS", "3600"))
+
+
+def _get_b2_bucket():
+    """Return a cached, authenticated B2 bucket instead of authorizing every request."""
+    global _B2_CLIENT, _B2_CLIENT_CONFIG
     key_id = os.getenv("B2_KEY_ID", "").strip()
     application_key = os.getenv("B2_APPLICATION_KEY", "").strip()
     bucket_name = os.getenv("B2_BUCKET_NAME", "").strip()
-
     if not (key_id and application_key and bucket_name):
-        raise HTTPException(
-            status_code=503,
-            detail="Backblaze B2 is not configured. Check B2_KEY_ID, B2_APPLICATION_KEY and B2_BUCKET_NAME."
-        )
+        raise HTTPException(status_code=503, detail="Backblaze B2 is not configured")
 
+    config = (key_id, application_key, bucket_name)
+    with _B2_LOCK:
+        if _B2_CLIENT is None or _B2_CLIENT_CONFIG != config:
+            try:
+                from b2sdk.v2 import InMemoryAccountInfo, B2Api
+                info = InMemoryAccountInfo()
+                api = B2Api(info)
+                api.authorize_account("production", key_id, application_key)
+                bucket = api.get_bucket_by_name(bucket_name)
+                _B2_CLIENT = (api, bucket)
+                _B2_CLIENT_CONFIG = config
+            except Exception as exc:
+                _B2_CLIENT = None
+                _B2_CLIENT_CONFIG = None
+                print(f"Backblaze B2 authorization failed: {exc}")
+                raise HTTPException(status_code=502, detail="Не удалось подключиться к Backblaze B2")
+        return _B2_CLIENT[1]
+
+
+def upload_to_b2(data: bytes, filename: str, content_type: str):
+    """Store prize media in B2 using the cached bucket connection."""
     try:
-        from b2sdk.v2 import InMemoryAccountInfo, B2Api
-
-        info = InMemoryAccountInfo()
-        b2_api = B2Api(info)
-        b2_api.authorize_account("production", key_id, application_key)
-        bucket = b2_api.get_bucket_by_name(bucket_name)
+        bucket = _get_b2_bucket()
         bucket.upload_bytes(
             data,
             filename,
             content_type=content_type or "application/octet-stream",
         )
+        # Invalidate local cache if an object is replaced with the same key.
+        try:
+            (_B2_MEDIA_CACHE_DIR / filename).unlink(missing_ok=True)
+        except OSError:
+            pass
         return f"{WEBAPP_URL.rstrip('/')}/media/{filename}"
     except HTTPException:
         raise
@@ -358,27 +385,36 @@ def upload_to_b2(data: bytes, filename: str, content_type: str):
 
 
 def download_from_b2(filename: str):
-    """Download one object from the private B2 bucket into memory."""
-    key_id = os.getenv("B2_KEY_ID", "").strip()
-    application_key = os.getenv("B2_APPLICATION_KEY", "").strip()
-    bucket_name = os.getenv("B2_BUCKET_NAME", "").strip()
-    if not (key_id and application_key and bucket_name):
-        raise HTTPException(status_code=503, detail="Backblaze B2 is not configured")
+    """Download B2 media with a local disk cache to avoid repeated B2 reads."""
+    import tempfile
+
+    _B2_MEDIA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _B2_MEDIA_CACHE_DIR / filename
 
     try:
-        import tempfile
-        from b2sdk.v2 import InMemoryAccountInfo, B2Api
+        if cache_path.is_file() and (time.time() - cache_path.stat().st_mtime) < _B2_MEDIA_CACHE_TTL:
+            return cache_path.read_bytes()
+    except OSError:
+        pass
 
-        info = InMemoryAccountInfo()
-        b2_api = B2Api(info)
-        b2_api.authorize_account("production", key_id, application_key)
-        bucket = b2_api.get_bucket_by_name(bucket_name)
-
-        # b2sdk save_to() expects a filesystem path, not a BytesIO object.
-        with tempfile.TemporaryDirectory() as temp_dir:
-            local_path = Path(temp_dir) / filename
-            bucket.download_file_by_name(filename).save_to(str(local_path))
-            return local_path.read_bytes()
+    try:
+        bucket = _get_b2_bucket()
+        # Download to a temporary file, then atomically move it into the cache.
+        with tempfile.NamedTemporaryFile(dir=str(_B2_MEDIA_CACHE_DIR), prefix="tmp-", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        try:
+            bucket.download_file_by_name(filename).save_to(str(temp_path))
+            data = temp_path.read_bytes()
+            try:
+                temp_path.replace(cache_path)
+            except OSError:
+                pass
+            return data
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     except HTTPException:
         raise
     except Exception as exc:
