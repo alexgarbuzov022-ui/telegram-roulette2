@@ -1530,7 +1530,7 @@ async def promo_check(m: Message):
     await m.answer(
         "✅ Проверка конкурса и запроса к Neon прошла успешно.\n"
         f"Подходящих участников на текущий момент: {len(qualifying)}\n"
-        "Период конкурса: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.\n"
+        "Период конкурса: 16.10.2026 00:00 — 21.10.2026 13:00 МСК.\n"
         "До окончания конкурса эта команда только проверяет базу и ничего не разыгрывает."
     )
 
@@ -1554,7 +1554,7 @@ async def promo_participants(m: Message):
     document = BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename="promo_participants_2026-10-16_21.csv")
     await m.answer_document(document, caption=(
         f"📋 Подходящих участников: {len(qualifying)}\n"
-        "Период: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.\n"
+        "Период: 16.10.2026 00:00 — 21.10.2026 13:00 МСК.\n"
         "Условия: участник сам совершил успешную покупку в периоде и минимум один приглашённый друг совершил успешную покупку в периоде.\n"
         "Это предварительная выгрузка. Для жеребьёвки используй /promo_draw после проверки списка."
     ))
@@ -1585,7 +1585,7 @@ async def promo_draw(m: Message):
         c.execute("INSERT INTO promo_draws(event_key,participants_json,winners_json,status,drawn_by) VALUES(?,?,?,?,?)",
                   (PROMO_EVENT_KEY,json.dumps(participants,ensure_ascii=False),json.dumps(winners_payload,ensure_ascii=False),"awaiting_confirmation",m.from_user.id))
     audit(m.from_user.id, "promo_draw", f"participants={len(participants)}; winners=3; event={PROMO_EVENT_KEY}")
-    lines=[f"🎲 <b>Результаты жеребьёвки — проверка администратором</b>",f"Участников: {len(participants)}","Период: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.",""]
+    lines=[f"🎲 <b>Результаты жеребьёвки — проверка администратором</b>",f"Участников: {len(participants)}","Период: 16.10.2026 00:00 — 21.10.2026 13:00 МСК.",""]
     for w in winners_payload:
         username = ("@"+w["username"]) if w["username"] else "username не указан"
         lines.append(f"<b>{w['place']}-е место — {html.escape(w['prize'])}</b>")
