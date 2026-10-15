@@ -1479,6 +1479,46 @@ async def claim_prize_for_user(uid: int, spin_id: int):
             return False, "Этот приз уже ожидает открытия"
         if int(row["claimed"] or 0) >= 2:
             return False, "Этот приз уже открыт"
+
+        # Bonus-spin rewards do not have media to open. Credit once and mark
+        # claimed=2 so they disappear from the pending "Мои призы" list.
+        prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
+        prize_type = str((row["prize_type"] or (prize["prize_type"] if prize else "")) or "").lower()
+        if prize_type in {"spins", "spin", "bonus_spins"}:
+            label = str(row["prize_label"] or (prize["name"] if prize else "") or "")
+            amount = 0
+            if prize:
+                try:
+                    amount = int(prize["points"] or 0)
+                except (TypeError, ValueError):
+                    amount = 0
+            if amount < 1:
+                match = re.search(r"\\+?\\s*(\\d+)", label)
+                amount = int(match.group(1)) if match else 0
+            if amount < 1:
+                return False, "Не удалось определить количество бонусных вращений. Напиши администратору."
+            update = c.execute(
+                "UPDATE spins SET claimed=2 WHERE id=? AND telegram_id=? AND claimed=0",
+                (spin_id, uid),
+            )
+            if update.rowcount != 1:
+                return False, "Этот приз уже обработан"
+            c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (amount, uid))
+            balance_row = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()
+            balance = int(balance_row["spins"] if balance_row else 0)
+            try:
+                await bot.send_message(
+                    uid,
+                    f"🎉 <b>Бонус начислен!</b>\\n\\n"
+                    f"🎰 Добавлено вращений: <b>{amount}</b>\\n"
+                    f"💰 Твой баланс: <b>{balance}</b> вращений",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                # The reward is already credited and closed; do not roll it back
+                # or a retry could credit the same bonus twice.
+                print(f"Could not notify user {uid} about bonus spins {spin_id}: {type(exc).__name__}: {exc}")
+            return True, f"Начислено {amount} вращений. Баланс: {balance}."
         value = str(row["delivery_value"] or "").strip()
         # For photo/video packs, the attached prize media is authoritative. Older
         # spin rows may contain only the legacy single-file delivery_value.
