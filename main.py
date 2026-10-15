@@ -131,6 +131,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS audit(
           id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER, action TEXT NOT NULL,
           details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS promo_draws(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT NOT NULL UNIQUE,
+          participants_json TEXT NOT NULL, winners_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'drawn', drawn_by INTEGER, confirmed_by INTEGER,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP, confirmed_at TEXT DEFAULT NULL);
         CREATE TABLE IF NOT EXISTS orders(
           id TEXT PRIMARY KEY, telegram_id INTEGER NOT NULL, method TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pending', details TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -176,8 +181,6 @@ def init_db():
             ("private_discount10", "Скидка 10% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Обычный", 8, 0, "text", "", "[]"),
             ("private_discount50", "Скидка 50% на приват", "Код скидки или инструкция выдачи настраивается администратором.", "", "Эпический", 1, 0, "text", "", "[]"),
             ("circle_dm", "Кружок в личные сообщения", "Добавь видео-кружок или file_id в медиа приза.", "", "Редкий", 3, 0, "video_note", "", "[]"),
-            ("circle_model1", "1 кружок модели", "Один случайный кружок из списка Telegram file_id.", "", "Редкий", 3, 0, "video_note", "", "[]"),
-            ("voice_model1", "1 ГС модели", "Одно случайное голосовое сообщение из списка Telegram file_id.", "", "Редкий", 3, 0, "voice", "", "[]"),
             ("video_face", "Видео с лицом", "Добавь видео в медиа приза.", "", "Редкий", 4, 0, "video", "", "[]"),
             ("video_pack3", "Пакет из 3 видео", "Добавь три видео в медиа приза; бот отправит их все.", "", "Эпический", 1.5, 0, "media_group", "", "[]"),
             ("rating_member", "Оценка члена", "Администратор укажет способ получения/инструкцию в поле выдачи.", "", "Мифический", 0.1, 0, "text", "", "[]"),
@@ -835,31 +838,18 @@ async def spin(authorization: str|None=Header(default=None)):
             media_type = str(item.get("type", "")).lower().strip()
             if media_type in {"image", "картинка", "фото"} or media_type.startswith("image/"):
                 media_type = "photo"
-            elif media_type in {"видео"} or media_type.startswith("video/"):
+            if media_type in {"видео"} or media_type.startswith("video/"):
                 media_type = "video"
-            elif media_type in {"кружок", "video_note", "videonote"}:
-                media_type = "video_note"
-            elif media_type in {"гс", "голос", "голосовое", "voice_message"}:
-                media_type = "voice"
-            if media_type in {"photo", "video", "video_note", "voice"}:
+            if media_type in {"photo", "video"}:
                 valid_media.append({"url": file_value, "type": media_type})
 
-        configured_type = str(chosen["prize_type"] or "").lower().strip()
-        if configured_type in {"кружок", "video_note", "videonote"} or "кружок" in prize_name_norm:
-            wanted_media_type = "video_note"
-        elif configured_type in {"voice", "голос", "гс", "голосовое"} or re.search(r"\bгс\b|голосов", prize_name_norm):
-            wanted_media_type = "voice"
-        elif configured_type in {"video", "видео"} or "видео" in prize_name_norm or "video" in prize_name_norm:
-            wanted_media_type = "video"
-        elif configured_type in {"photo", "фото", "image"} or any(x in prize_name_norm for x in ("фото", "фотограф", "photo", "picture")):
-            wanted_media_type = "photo"
-        else:
-            wanted_media_type = ""
-
-        # Telegram file_id pools may be pasted one per line or separated by semicolons.
-        # On every win select exactly one random item for circle/voice/video prizes;
-        # save that selected ID in the spin so opening the prize is stable.
-        if not valid_media and delivery_payload:
+        # Telegram file_id values can also be pasted into the legacy "delivery_value"
+        # field, one per line or separated by semicolons. Treat them as a candidate pool.
+        wants_video = (
+            "видео" in prize_name_norm or "video" in prize_name_norm
+            or str(chosen["prize_type"] or "").lower() in {"video", "видео"}
+        )
+        if not valid_media and wants_video and delivery_payload:
             raw_candidates = []
             try:
                 parsed_delivery = json.loads(delivery_payload)
@@ -871,33 +861,29 @@ async def spin(authorization: str|None=Header(default=None)):
                 for item in raw_candidates:
                     if isinstance(item, dict):
                         file_value = str(item.get("url") or item.get("file_id") or "").strip()
-                        media_type = str(item.get("type") or wanted_media_type or "").lower().strip()
-                        if media_type in {"кружок", "videonote"}:
-                            media_type = "video_note"
-                        if media_type in {"гс", "голос", "голосовое"}:
-                            media_type = "voice"
-                        if file_value and (not wanted_media_type or media_type == wanted_media_type):
-                            valid_media.append({"url": file_value, "type": media_type or wanted_media_type})
+                        media_type = str(item.get("type") or "video").lower().strip()
+                        if file_value and media_type in {"video", "видео"}:
+                            valid_media.append({"url": file_value, "type": "video"})
             else:
                 candidates = [part.strip() for line in delivery_payload.splitlines() for part in line.split(";") if part.strip()]
-                if wanted_media_type:
-                    valid_media = [{"url": item, "type": wanted_media_type} for item in candidates]
+                valid_media = [{"url": item, "type": "video"} for item in candidates]
 
         if valid_media:
-            if wanted_media_type:
-                matching = [m for m in valid_media if m["type"] == wanted_media_type]
-                if not matching:
-                    raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа.")
+            # Choose exactly the requested number of unique entries at random.
+            matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
+            if matching:
                 valid_media = matching
+            else:
+                raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа ({'видео' if wants_video else 'фото'}).")
+            # Deduplicate repeated IDs so one video is not sent twice in the same pack.
             unique_media = list({(m["type"], m["url"]): m for m in valid_media}.values())
             if len(unique_media) < wanted_count:
                 raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {wanted_count} разных файлов, прикреплено {len(unique_media)} подходящих.")
-            selected_count = wanted_count if wanted_media_type in {"photo", "video"} else 1
-            valid_media = secrets.SystemRandom().sample(unique_media, selected_count)
+            valid_media = secrets.SystemRandom().sample(unique_media, wanted_count)
             delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
-        elif wanted_media_type in {"video", "video_note", "voice"}:
-            kind_label = {"video": "видеофайл", "video_note": "кружок", "voice": "голосовое сообщение"}[wanted_media_type]
-            raise HTTPException(400, f"Для приза «{chosen['name']}» добавь Telegram file_id {kind_label} в поле «Содержимое приза» (по одному на строку).")
+        elif wants_video:
+            # Never substitute the prize-card image for a missing video.
+            raise HTTPException(400, f"Для видеоприза «{chosen['name']}» добавь Telegram file_id видео в список медиа или в поле «Содержимое приза».")
         elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
             delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
@@ -1083,35 +1069,6 @@ async def admin_statistics(authorization: str|None=Header(default=None)):
             "users": formatted}
 
 
-@app.get("/api/admin/users/{telegram_id}")
-async def admin_user_detail(telegram_id: int, authorization: str|None=Header(default=None)):
-    """Return a full admin-only detail page payload for one Telegram user."""
-    require_admin(authorization)
-    with db() as c:
-        user = c.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
-        if not user:
-            raise HTTPException(404, "Пользователь не найден")
-        spins = c.execute("""
-            SELECT id, prize_id, prize_label, rarity, image, points_awarded,
-                   created_at, prize_type, delivery_value, claimed
-            FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 200
-        """, (telegram_id,)).fetchall()
-        payments = c.execute("""
-            SELECT charge_id, total_amount, currency, spins_added, created_at
-            FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100
-        """, (telegram_id,)).fetchall()
-        orders = c.execute("""
-            SELECT id, method, status, details, created_at
-            FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100
-        """, (telegram_id,)).fetchall()
-    return {
-        "user": dict(user),
-        "spins": [dict(row) for row in spins],
-        "payments": [dict(row) for row in payments],
-        "orders": [dict(row) for row in orders],
-    }
-
-
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
     uid = require_admin(authorization)
@@ -1153,26 +1110,7 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
     except (TypeError, ValueError):
         raise HTTPException(400, "Вес и количество баллов должны быть числами")
     rarity = str(payload.get("rarity", "Обычный"))[:40]
-    # Keep Telegram circle/voice prizes strictly file_id-based. Uploaded web media
-    # must never override these prize types when an existing prize is edited.
-    raw_prize_type = str(payload.get("type", "points")).strip().lower()
-    type_aliases = {
-        "кружок": "video_note", "videonote": "video_note",
-        "гс": "voice", "голос": "voice", "голосовое": "voice",
-        "image": "photo", "фото": "photo", "видео": "video",
-    }
-    prize_type = type_aliases.get(raw_prize_type, raw_prize_type)[:30]
-    delivery_value = str(payload.get("delivery_value", "") or "").strip()
-    if prize_type in {"video_note", "voice"}:
-        file_ids = [part.strip() for line in delivery_value.splitlines() for part in line.split(";") if part.strip()]
-        if not file_ids:
-            label = "кружка" if prize_type == "video_note" else "голосового сообщения"
-            raise HTTPException(400, f"Для выдачи {label} вставь хотя бы один Telegram file_id в поле «Содержимое / Telegram file_id».")
-        # Store one ID per line and deliberately discard uploaded media for these types.
-        delivery_value = "\n".join(file_ids)
-        media_files = []
-    else:
-        media_files = payload.get("media_files", [])
+    media_files = payload.get("media_files", [])
     if not isinstance(media_files, list):
         raise HTTPException(400, "Список медиафайлов задан неверно")
     normalized_media = []
@@ -1199,8 +1137,8 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
             prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,
             enabled=excluded.enabled,media_pool=excluded.media_pool""",
             (pid, name, str(payload.get("description", ""))[:2000], str(payload.get("image", ""))[:1000],
-             rarity, weight, points, prize_type,
-             delivery_value[:2000], media_json,
+             rarity, weight, points, str(payload.get("type", "points"))[:30],
+             str(payload.get("delivery_value", ""))[:2000], media_json,
              1 if payload.get("enabled", True) else 0, media_pool))
     audit(uid, "save_prize", f"{pid}: {name}; weight={weight}; rarity={rarity}; media={len(media_files)}")
     return {"ok": True, "id": pid}
@@ -1508,65 +1446,178 @@ async def menu_profile(m: Message):
         await m.answer("Профиль пока пуст. Нажми /start.",reply_markup=reply_menu()); return
     await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
 
+PROMO_EVENT_KEY = "roulette_promo_2026-11-16_2026-11-21_1300_msk"
+PROMO_START_UTC = "2026-11-15 21:00:00"  # 16 Nov 00:00 Moscow
+PROMO_END_UTC = "2026-11-21 10:00:00"    # 21 Nov 13:00 Moscow, exclusive
+PROMO_PRIZES = ["Приват на полгода", "Приват на месяц", "3 кружка"]
+PROMO_END_MSK = datetime(2026, 11, 21, 13, 0, tzinfo=timezone(timedelta(hours=3)))
+
+
+def promo_is_closed():
+    return datetime.now(timezone.utc) >= PROMO_END_MSK.astimezone(timezone.utc)
+
+
+def promo_qualifying_participants(c):
+    # Both the entrant's own successful purchase and at least one referred friend's
+    # successful purchase must fall within the announced contest interval.
+    rows = c.execute("""
+        SELECT u.telegram_id, u.username, u.first_name,
+          (SELECT COUNT(*) FROM payments p WHERE p.telegram_id=u.telegram_id
+             AND p.created_at >= ? AND p.created_at < ?)
+          +
+          (SELECT COUNT(*) FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved'
+             AND o.created_at >= ? AND o.created_at < ?) AS successful_purchases,
+          (SELECT COUNT(*) FROM users r
+             WHERE r.referred_by=u.telegram_id AND r.referral_paid=1
+               AND EXISTS (SELECT 1 FROM payments rp WHERE rp.telegram_id=r.telegram_id
+                           AND rp.created_at >= ? AND rp.created_at < ?)
+               OR r.referred_by=u.telegram_id AND r.referral_paid=1
+               AND EXISTS (SELECT 1 FROM orders ro WHERE ro.telegram_id=r.telegram_id AND ro.status='approved'
+                           AND ro.created_at >= ? AND ro.created_at < ?)) AS successful_referrals
+        FROM users u
+        WHERE (
+          EXISTS (SELECT 1 FROM payments p WHERE p.telegram_id=u.telegram_id AND p.created_at >= ? AND p.created_at < ?)
+          OR EXISTS (SELECT 1 FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved' AND o.created_at >= ? AND o.created_at < ?)
+        )
+        AND EXISTS (
+          SELECT 1 FROM users r WHERE r.referred_by=u.telegram_id AND r.referral_paid=1 AND (
+            EXISTS (SELECT 1 FROM payments rp WHERE rp.telegram_id=r.telegram_id AND rp.created_at >= ? AND rp.created_at < ?)
+            OR EXISTS (SELECT 1 FROM orders ro WHERE ro.telegram_id=r.telegram_id AND ro.status='approved' AND ro.created_at >= ? AND ro.created_at < ?)
+          )
+        )
+        ORDER BY u.telegram_id
+    """, (
+        PROMO_START_UTC,PROMO_END_UTC,PROMO_START_UTC,PROMO_END_UTC,
+        PROMO_START_UTC,PROMO_END_UTC,PROMO_START_UTC,PROMO_END_UTC,
+        PROMO_START_UTC,PROMO_END_UTC,PROMO_START_UTC,PROMO_END_UTC,
+        PROMO_START_UTC,PROMO_END_UTC,PROMO_START_UTC,PROMO_END_UTC
+    )).fetchall()
+    qualifying=[]
+    for row in rows:
+        referrals = c.execute("""
+            SELECT r.telegram_id, r.username, r.first_name FROM users r
+            WHERE r.referred_by=? AND r.referral_paid=1 AND (
+              EXISTS (SELECT 1 FROM payments p WHERE p.telegram_id=r.telegram_id AND p.created_at >= ? AND p.created_at < ?)
+              OR EXISTS (SELECT 1 FROM orders o WHERE o.telegram_id=r.telegram_id AND o.status='approved' AND o.created_at >= ? AND o.created_at < ?)
+            ) ORDER BY r.telegram_id
+        """, (row["telegram_id"],PROMO_START_UTC,PROMO_END_UTC,PROMO_START_UTC,PROMO_END_UTC)).fetchall()
+        qualifying.append({
+            "telegram_id": int(row["telegram_id"]), "username": row["username"] or "",
+            "name": row["first_name"] or "", "successful_purchases": int(row["successful_purchases"] or 0),
+            "successful_referrals": len(referrals), "referral_telegram_ids": [int(r["telegram_id"]) for r in referrals]
+        })
+    return qualifying
+
+
 @dp.message(Command("promo_participants"))
 async def promo_participants(m: Message):
-    """Export users who purchased spins and have at least one referred buyer."""
+    """Export contest-eligible participants for the fixed Moscow-time window."""
     if not m.from_user or not is_admin(m.from_user.id):
         await m.answer("⛔ Эта команда доступна только администратору.")
         return
-
-    with db() as c:
-        rows = c.execute("""
-            SELECT u.telegram_id, u.username, u.first_name,
-                   (SELECT COUNT(*) FROM payments p WHERE p.telegram_id=u.telegram_id)
-                   +
-                   (SELECT COUNT(*) FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved')
-                     AS successful_purchases,
-                   (SELECT COUNT(*) FROM users r
-                    WHERE r.referred_by=u.telegram_id AND r.referral_paid=1)
-                     AS successful_referrals
-            FROM users u
-            WHERE (
-                EXISTS (SELECT 1 FROM payments p WHERE p.telegram_id=u.telegram_id)
-                OR EXISTS (SELECT 1 FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved')
-            )
-            AND EXISTS (SELECT 1 FROM users r
-                        WHERE r.referred_by=u.telegram_id AND r.referral_paid=1)
-            ORDER BY u.telegram_id
-        """).fetchall()
-        qualifying = []
-        for row in rows:
-            referrals = c.execute(
-                "SELECT telegram_id, username, first_name FROM users WHERE referred_by=? AND referral_paid=1 ORDER BY telegram_id",
-                (row["telegram_id"],),
-            ).fetchall()
-            qualifying.append((row, referrals))
-
-    if not qualifying:
-        await m.answer("Пока нет участников, которые сами совершили успешную покупку и привели хотя бы одного друга с подтверждённой покупкой.")
+    if not promo_is_closed():
+        await m.answer("⏳ Конкурс ещё не завершён. Список можно зафиксировать после 21 ноября 2026 года, 13:00 по Москве.")
         return
-
+    with db() as c:
+        qualifying = promo_qualifying_participants(c)
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(["telegram_id", "username", "name", "successful_purchases", "successful_referrals", "referral_telegram_ids"])
-    for row, referrals in qualifying:
-        writer.writerow([
-            row["telegram_id"],
-            row["username"] or "",
-            row["first_name"] or "",
-            row["successful_purchases"],
-            row["successful_referrals"],
-            ",".join(str(ref["telegram_id"]) for ref in referrals),
-        ])
+    writer.writerow(["telegram_id", "username", "name", "successful_purchases_in_period", "successful_referrals_in_period", "referral_telegram_ids"])
+    for row in qualifying:
+        writer.writerow([row["telegram_id"], row["username"], row["name"], row["successful_purchases"], row["successful_referrals"], ",".join(map(str,row["referral_telegram_ids"]))])
+    document = BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename="promo_participants_2026-11-16_21.csv")
+    await m.answer_document(document, caption=(
+        f"📋 Подходящих участников: {len(qualifying)}\n"
+        "Период: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.\n"
+        "Условия: участник сам совершил успешную покупку в периоде и минимум один приглашённый друг совершил успешную покупку в периоде.\n"
+        "Это предварительная выгрузка. Для жеребьёвки используй /promo_draw после проверки списка."
+    ))
 
-    data = output.getvalue().encode("utf-8-sig")
-    document = BufferedInputFile(data, filename="promo_participants.csv")
-    await m.answer_document(
-        document,
-        caption=(f"✅ Подходящих участников: {len(qualifying)}\n"
-                 "Условия: участник сам совершил хотя бы одну подтверждённую покупку и привёл минимум одного друга, чья покупка подтверждена.\n"
-                 "Список включает всю историю базы данных, а не только конкретные даты акции."),
-    )
+
+@dp.message(Command("promo_draw"))
+async def promo_draw(m: Message):
+    """Select and save three distinct winners; only show them to the admin."""
+    if not m.from_user or not is_admin(m.from_user.id):
+        await m.answer("⛔ Эта команда доступна только администратору.")
+        return
+    if not promo_is_closed():
+        await m.answer("⏳ Жеребьёвка доступна после 21 ноября 2026 года, 13:00 по Москве.")
+        return
+    with db() as c:
+        existing = c.execute("SELECT * FROM promo_draws WHERE event_key=?", (PROMO_EVENT_KEY,)).fetchone()
+        if existing:
+            await m.answer("Жеребьёвка уже сохранена. Новые имена не выбираю. Используй /promo_result для просмотра результата.")
+            return
+        participants = promo_qualifying_participants(c)
+        if len(participants) < 3:
+            await m.answer(f"❌ Подходящих участников: {len(participants)}. Нужно минимум 3 для выбора трёх разных победителей. Новая жеребьёвка не проводилась.")
+            return
+        winners = secrets.SystemRandom().sample(participants, 3)
+        winners_payload=[]
+        for i, winner in enumerate(winners):
+            winners_payload.append({**winner, "place": i+1, "prize": PROMO_PRIZES[i]})
+        c.execute("INSERT INTO promo_draws(event_key,participants_json,winners_json,status,drawn_by) VALUES(?,?,?,?,?)",
+                  (PROMO_EVENT_KEY,json.dumps(participants,ensure_ascii=False),json.dumps(winners_payload,ensure_ascii=False),"awaiting_confirmation",m.from_user.id))
+    audit(m.from_user.id, "promo_draw", f"participants={len(participants)}; winners=3; event={PROMO_EVENT_KEY}")
+    lines=[f"🎲 <b>Результаты жеребьёвки — проверка администратором</b>",f"Участников: {len(participants)}","Период: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.",""]
+    for w in winners_payload:
+        username = ("@"+w["username"]) if w["username"] else "username не указан"
+        lines.append(f"<b>{w['place']}-е место — {html.escape(w['prize'])}</b>")
+        lines.append(f"Имя: {html.escape(w['name'] or 'Не указано')} | {html.escape(username)} | ID: <code>{w['telegram_id']}</code>")
+    lines += ["", "Победители пока НЕ уведомлены.", "Проверь список и отправь /promo_confirm только когда готов разослать сообщения."]
+    await m.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("promo_result"))
+async def promo_result(m: Message):
+    if not m.from_user or not is_admin(m.from_user.id):
+        await m.answer("⛔ Эта команда доступна только администратору.")
+        return
+    with db() as c:
+        draw = c.execute("SELECT * FROM promo_draws WHERE event_key=?", (PROMO_EVENT_KEY,)).fetchone()
+    if not draw:
+        await m.answer("Жеребьёвка ещё не проводилась. После окончания конкурса используй /promo_participants, проверь CSV, затем /promo_draw.")
+        return
+    winners=json.loads(draw["winners_json"] or "[]")
+    lines=["🎲 <b>Сохранённые результаты жеребьёвки</b>",f"Статус: {html.escape(draw['status'])}",""]
+    for w in winners:
+        username=("@"+w["username"]) if w.get("username") else "username не указан"
+        lines.append(f"<b>{w['place']}-е место — {html.escape(w['prize'])}</b>")
+        lines.append(f"Имя: {html.escape(w.get('name') or 'Не указано')} | {html.escape(username)} | ID: <code>{w['telegram_id']}</code>")
+    await m.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("promo_confirm"))
+async def promo_confirm(m: Message):
+    """Admin-only final confirmation; send each winner their prize notice once."""
+    if not m.from_user or not is_admin(m.from_user.id):
+        await m.answer("⛔ Эта команда доступна только администратору.")
+        return
+    with db() as c:
+        draw = c.execute("SELECT * FROM promo_draws WHERE event_key=?", (PROMO_EVENT_KEY,)).fetchone()
+        if not draw:
+            await m.answer("Сначала проведи жеребьёвку командой /promo_draw.")
+            return
+        if draw["status"] == "confirmed":
+            await m.answer("Результаты уже подтверждены. Повторно сообщения не отправляю.")
+            return
+        winners=json.loads(draw["winners_json"] or "[]")
+        c.execute("UPDATE promo_draws SET status='confirmed',confirmed_by=?,confirmed_at=CURRENT_TIMESTAMP WHERE event_key=? AND status='awaiting_confirmation'", (m.from_user.id,PROMO_EVENT_KEY))
+    sent=[]; failed=[]
+    for w in winners:
+        msg=(f"🎉 Поздравляем! Ты выиграл(а) в конкурсе!\n\n🎁 Твой приз: {w['prize']}\n\nЧтобы получить приз, напиши в личные сообщения @XDarryanaX.")
+        try:
+            await bot.send_message(int(w["telegram_id"]), msg)
+            sent.append(w)
+        except Exception as exc:
+            failed.append((w, str(exc)[:160]))
+    audit(m.from_user.id,"promo_confirm",f"sent={len(sent)}; failed={len(failed)}; event={PROMO_EVENT_KEY}")
+    lines=["📨 <b>Рассылка результатов конкурса завершена</b>",f"Успешно отправлено: {len(sent)}",f"Не удалось отправить: {len(failed)}"]
+    if failed:
+        lines.append("\nНе удалось написать этим победителям (возможно, они не запускали бота):")
+        for w,err in failed:
+            lines.append(f"ID <code>{w['telegram_id']}</code> — {html.escape(err)}")
+    await m.answer("\n".join(lines),parse_mode="HTML")
 
 
 @dp.message(F.text == "🎟 Купить вращения")
@@ -1678,53 +1729,41 @@ async def claim_prize_for_user(uid: int, spin_id: int):
                     existing_media = parsed_value["media_files"]
             except (ValueError, TypeError):
                 pass
-            prize_kind = str(prize["prize_type"] or "").lower().strip()
-            if prize_kind in {"video_note", "кружок", "videonote"} or "кружок" in name_norm:
-                kind_wanted = "video_note"
-            elif prize_kind in {"voice", "гс", "голос", "голосовое"} or re.search(r"\bгс\b|голосов", name_norm):
-                kind_wanted = "voice"
-            elif prize_kind in {"video", "видео"} or "видео" in name_norm or "video" in name_norm:
-                kind_wanted = "video"
-            else:
-                kind_wanted = "photo"
+            kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
             existing_matching = [x for x in existing_media if isinstance(x, dict) and x.get("url") and ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
             prize_media = []
             try:
                 prize_media = json.loads(prize["media_files"] or "[]")
             except (ValueError, TypeError):
                 prize_media = []
-            valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and str(x.get("type") or "").lower() in {"photo", "image", "video", "video_note", "кружок", "voice", "гс", "голос", "голосовое"}]
-            matching = [x for x in valid if ("photo" if x.get("type") == "image" else str(x.get("type") or "").lower()) == kind_wanted]
-            # For circle and voice prizes, never fall back to unrelated uploaded
-            # photos/videos. The selected type and delivery_value file IDs are authoritative.
-            if kind_wanted in {"video_note", "voice"}:
-                valid = matching
-            elif matching:
+            valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and x.get("type") in {"photo", "image", "video"}]
+            matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+            if matching:
                 valid = matching
 
             # For video prizes, media_files is the preferred pool. If none was
             # uploaded, allow multiple Telegram file_ids / URLs in delivery_value,
             # one per line or separated by semicolons. Select randomly per win.
             raw_delivery = str(prize["delivery_value"] or "").strip()
-            if kind_wanted in {"video", "video_note", "voice"} and not valid and raw_delivery:
+            if kind_wanted == "video" and not valid and raw_delivery:
                 has_media_payload = False
                 try:
                     parsed_delivery = json.loads(raw_delivery)
                     has_media_payload = isinstance(parsed_delivery, dict) and isinstance(parsed_delivery.get("media_files"), list)
                     if has_media_payload:
                         valid = [
-                            {"url": str(x.get("url") or x.get("file_id") or "").strip(), "type": kind_wanted}
+                            {"url": str(x.get("url") or x.get("file_id") or "").strip(), "type": "video"}
                             for x in parsed_delivery["media_files"]
                             if isinstance(x, dict) and str(x.get("url") or x.get("file_id") or "").strip()
-                            and str(x.get("type") or kind_wanted).lower() in ({"video", "видео"} if kind_wanted == "video" else ({"video_note", "кружок", "videonote"} if kind_wanted == "video_note" else {"voice", "гс", "голос", "голосовое"}))
+                            and str(x.get("type") or "video").lower() in {"video", "видео"}
                         ]
                 except (ValueError, TypeError):
                     pass
                 if not valid and not has_media_payload:
                     candidates = [part.strip() for line in raw_delivery.splitlines() for part in line.split(";") if part.strip()]
-                    valid = [{"url": item, "type": kind_wanted} for item in candidates]
-            if valid and (wanted > 1 or kind_wanted in {"video", "video_note", "voice"}):
-                pick_count = min(wanted, len(valid)) if wanted > 1 and kind_wanted in {"photo", "video"} else 1
+                    valid = [{"url": item, "type": "video"} for item in candidates]
+            if valid and (wanted > 1 or kind_wanted == "video"):
+                pick_count = min(wanted, len(valid)) if wanted > 1 else 1
                 chosen_media = secrets.SystemRandom().sample(valid, pick_count)
                 value = json.dumps({"media_files": chosen_media}, ensure_ascii=False)
             if not value:
@@ -1864,8 +1903,6 @@ async def open_prize(cb):
         if media_payload:
             photos = []
             videos = []
-            video_notes = []
-            voices = []
             for item in media_payload:
                 if not isinstance(item, dict):
                     continue
@@ -1877,11 +1914,7 @@ async def open_prize(cb):
                     photos.append(media_value)
                 elif media_type in {"video", "видео"} or media_type.startswith("video/"):
                     videos.append(media_value)
-                elif media_type in {"video_note", "кружок", "videonote"}:
-                    video_notes.append(media_value)
-                elif media_type in {"voice", "гс", "голос", "голосовое"}:
-                    voices.append(media_value)
-            if not photos and not videos and not video_notes and not voices:
+            if not photos and not videos:
                 raise ValueError("В призе нет файлов для отправки")
             # Fetch web URLs in the bot process and upload bytes to Telegram. This avoids
             # Telegram being unable to fetch private/slow B2-backed media URLs itself.
@@ -1904,10 +1937,6 @@ async def open_prize(cb):
             for video_index, url in enumerate(videos, start=1):
                 video_file = await prepare_telegram_media(url, video_index, ".mp4")
                 await bot.send_video(cb.from_user.id, video_file, caption=f"🎬 {row['prize_label']}" if video_index == 1 else None)
-            for circle_value in video_notes:
-                await bot.send_video_note(cb.from_user.id, circle_value)
-            for voice_value in voices:
-                await bot.send_voice(cb.from_user.id, voice_value, caption=f"🎙 {row['prize_label']}")
             if not photos and videos:
                 # The first video already carries the prize caption.
                 pass
@@ -1928,12 +1957,6 @@ async def open_prize(cb):
         elif kind in {"video_note", "кружок"}:
             await bot.send_video_note(cb.from_user.id, value)
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n\nЕсли это бонусный кружок, перешли сообщение с кружком в личку модели @XDarryanaX.")
-        elif kind in {"voice", "гс", "голос", "голосовое"}:
-            voice_values = [part.strip() for line in value.splitlines() for part in line.split(";") if part.strip()]
-            if not voice_values:
-                raise ValueError("Не указаны Telegram file_id голосового сообщения")
-            for index, voice_value in enumerate(voice_values):
-                await bot.send_voice(cb.from_user.id, voice_value, caption=f"🎙 Твой приз: {row['prize_label']}" if index == 0 else None)
         elif kind in {"link", "url", "ссылка"}:
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n{value}", disable_web_page_preview=False)
         else:
@@ -1961,7 +1984,7 @@ async def open_prize(cb):
             pass
         await cb.answer("Приз закрыт и убран из ожидающих: отправка не удалась.", show_alert=True)
 
-@dp.message(F.video_note | F.video | F.voice | F.document)
+@dp.message(F.video_note | F.video | F.document)
 async def admin_video_file_id(m: Message):
     if not m.from_user or not is_admin(m.from_user.id):
         return
@@ -1971,19 +1994,13 @@ async def admin_video_file_id(m: Message):
         kind = "кружок"
         prize_type = "video_note"
         size = m.video_note.file_size or 0
-        hint = "В админке выбери тип выдачи «Кружок» (video_note) и вставь file_id в «Содержимое приза». Можно добавить несколько file_id — бот выберет один случайный."
+        hint = "В админке выбери тип выдачи «Кружок» (video_note) и вставь file_id в «Содержимое приза»."
     elif m.video:
         file_id = m.video.file_id
         kind = "видео"
         prize_type = "video"
         size = m.video.file_size or 0
         hint = "В админке выбери тип выдачи «Видео» и вставь file_id в «Содержимое приза»."
-    elif m.voice:
-        file_id = m.voice.file_id
-        kind = "голосовое сообщение"
-        prize_type = "voice"
-        size = m.voice.file_size or 0
-        hint = "В админке выбери тип выдачи «Голосовое сообщение (ГС)» и вставь file_id в «Содержимое приза». Можно добавить несколько file_id — бот выберет один случайный."
     elif m.document and (m.document.mime_type or "").startswith("video/"):
         file_id = m.document.file_id
         kind = "видеофайл"
