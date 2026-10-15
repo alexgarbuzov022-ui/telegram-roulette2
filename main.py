@@ -1153,7 +1153,26 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
     except (TypeError, ValueError):
         raise HTTPException(400, "Вес и количество баллов должны быть числами")
     rarity = str(payload.get("rarity", "Обычный"))[:40]
-    media_files = payload.get("media_files", [])
+    # Keep Telegram circle/voice prizes strictly file_id-based. Uploaded web media
+    # must never override these prize types when an existing prize is edited.
+    raw_prize_type = str(payload.get("type", "points")).strip().lower()
+    type_aliases = {
+        "кружок": "video_note", "videonote": "video_note",
+        "гс": "voice", "голос": "voice", "голосовое": "voice",
+        "image": "photo", "фото": "photo", "видео": "video",
+    }
+    prize_type = type_aliases.get(raw_prize_type, raw_prize_type)[:30]
+    delivery_value = str(payload.get("delivery_value", "") or "").strip()
+    if prize_type in {"video_note", "voice"}:
+        file_ids = [part.strip() for line in delivery_value.splitlines() for part in line.split(";") if part.strip()]
+        if not file_ids:
+            label = "кружка" if prize_type == "video_note" else "голосового сообщения"
+            raise HTTPException(400, f"Для выдачи {label} вставь хотя бы один Telegram file_id в поле «Содержимое / Telegram file_id».")
+        # Store one ID per line and deliberately discard uploaded media for these types.
+        delivery_value = "\n".join(file_ids)
+        media_files = []
+    else:
+        media_files = payload.get("media_files", [])
     if not isinstance(media_files, list):
         raise HTTPException(400, "Список медиафайлов задан неверно")
     normalized_media = []
@@ -1180,8 +1199,8 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
             prize_type=excluded.prize_type,delivery_value=excluded.delivery_value,media_files=excluded.media_files,
             enabled=excluded.enabled,media_pool=excluded.media_pool""",
             (pid, name, str(payload.get("description", ""))[:2000], str(payload.get("image", ""))[:1000],
-             rarity, weight, points, str(payload.get("type", "points"))[:30],
-             str(payload.get("delivery_value", ""))[:2000], media_json,
+             rarity, weight, points, prize_type,
+             delivery_value[:2000], media_json,
              1 if payload.get("enabled", True) else 0, media_pool))
     audit(uid, "save_prize", f"{pid}: {name}; weight={weight}; rarity={rarity}; media={len(media_files)}")
     return {"ok": True, "id": pid}
@@ -1675,8 +1694,12 @@ async def claim_prize_for_user(uid: int, spin_id: int):
             except (ValueError, TypeError):
                 prize_media = []
             valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and str(x.get("type") or "").lower() in {"photo", "image", "video", "video_note", "кружок", "voice", "гс", "голос", "голосовое"}]
-            matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
-            if matching:
+            matching = [x for x in valid if ("photo" if x.get("type") == "image" else str(x.get("type") or "").lower()) == kind_wanted]
+            # For circle and voice prizes, never fall back to unrelated uploaded
+            # photos/videos. The selected type and delivery_value file IDs are authoritative.
+            if kind_wanted in {"video_note", "voice"}:
+                valid = matching
+            elif matching:
                 valid = matching
 
             # For video prizes, media_files is the preferred pool. If none was
