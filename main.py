@@ -1446,11 +1446,11 @@ async def menu_profile(m: Message):
         await m.answer("Профиль пока пуст. Нажми /start.",reply_markup=reply_menu()); return
     await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
 
-PROMO_EVENT_KEY = "roulette_promo_2026-11-16_2026-11-21_1300_msk"
-PROMO_START_UTC = "2026-11-15 21:00:00"  # 16 Nov 00:00 Moscow
-PROMO_END_UTC = "2026-11-21 10:00:00"    # 21 Nov 13:00 Moscow, exclusive
+PROMO_EVENT_KEY = "roulette_promo_2026-10-16_2026-10-21_1300_msk"
+PROMO_START_UTC = "2026-10-15 21:00:00"  # 16 Oct 00:00 Moscow
+PROMO_END_UTC = "2026-10-21 10:00:00"    # 21 Oct 13:00 Moscow, exclusive
 PROMO_PRIZES = ["Приват на полгода", "Приват на месяц", "3 кружка"]
-PROMO_END_MSK = datetime(2026, 11, 21, 13, 0, tzinfo=timezone(timedelta(hours=3)))
+PROMO_END_MSK = datetime(2026, 10, 21, 13, 0, tzinfo=timezone(timedelta(hours=3)))
 
 
 def promo_is_closed():
@@ -1542,7 +1542,7 @@ async def promo_participants(m: Message):
         await m.answer("⛔ Эта команда доступна только администратору.")
         return
     if not promo_is_closed():
-        await m.answer("⏳ Конкурс ещё не завершён. Список можно зафиксировать после 21 ноября 2026 года, 13:00 по Москве.")
+        await m.answer("⏳ Конкурс ещё не завершён. Список можно зафиксировать после 21 октября 2026 года, 13:00 по Москве.")
         return
     with db() as c:
         qualifying = promo_qualifying_participants(c)
@@ -1551,7 +1551,7 @@ async def promo_participants(m: Message):
     writer.writerow(["telegram_id", "username", "name", "successful_purchases_in_period", "successful_referrals_in_period", "referral_telegram_ids"])
     for row in qualifying:
         writer.writerow([row["telegram_id"], row["username"], row["name"], row["successful_purchases"], row["successful_referrals"], ",".join(map(str,row["referral_telegram_ids"]))])
-    document = BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename="promo_participants_2026-11-16_21.csv")
+    document = BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename="promo_participants_2026-10-16_21.csv")
     await m.answer_document(document, caption=(
         f"📋 Подходящих участников: {len(qualifying)}\n"
         "Период: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.\n"
@@ -1567,7 +1567,7 @@ async def promo_draw(m: Message):
         await m.answer("⛔ Эта команда доступна только администратору.")
         return
     if not promo_is_closed():
-        await m.answer("⏳ Жеребьёвка доступна после 21 ноября 2026 года, 13:00 по Москве.")
+        await m.answer("⏳ Жеребьёвка доступна после 21 октября 2026 года, 13:00 по Москве.")
         return
     with db() as c:
         existing = c.execute("SELECT * FROM promo_draws WHERE event_key=?", (PROMO_EVENT_KEY,)).fetchone()
