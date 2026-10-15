@@ -143,6 +143,11 @@ def init_db():
         add_column_if_missing(c, "users", "spin_discount_pct", "INTEGER NOT NULL DEFAULT 0")
         add_column_if_missing(c, "users", "spin_discount_expires_at", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "users", "private_discount_pct", "INTEGER NOT NULL DEFAULT 0")
+        # User identity and first-activity timestamps for future analytics.
+        add_column_if_missing(c, "users", "username", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "first_name", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "first_start_at", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "first_spin_at", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "spins", "prize_type", "TEXT NOT NULL DEFAULT 'points'")
         add_column_if_missing(c, "spins", "delivery_value", "TEXT DEFAULT ''")
         add_column_if_missing(c, "spins", "claimed", "INTEGER NOT NULL DEFAULT 0")
@@ -646,12 +651,15 @@ async def create_invoice(payload: dict, authorization: str|None=Header(default=N
 async def spin(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
     # Get username from Telegram's validated WebApp initData.
+    tg_user = {}
     try:
         tg_user = validate_init_data(authorization[4:]) if authorization and authorization.startswith("tma ") else {}
         username = tg_user.get("username")
         full_name = " ".join(x for x in (tg_user.get("first_name"), tg_user.get("last_name")) if x).strip()
         user_label = f"@{username}" if username else (full_name or f"ID {uid}")
     except Exception:
+        username = None
+        full_name = ""
         user_label = f"ID {uid}"
     admin_free = is_admin(uid)
     with db() as c:
@@ -661,6 +669,11 @@ async def spin(authorization: str|None=Header(default=None)):
         else:
             c.execute("BEGIN IMMEDIATE")
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+        # Store profile fields from validated Telegram Mini App data and record first spin once.
+        c.execute(
+            "UPDATE users SET username=COALESCE(?, username), first_name=COALESCE(?, first_name) WHERE telegram_id=?",
+            (username or None, full_name or None, uid),
+        )
         u = c.execute("SELECT spins FROM users WHERE telegram_id=?", (uid,)).fetchone()
         if not admin_free and (not u or u["spins"] < 1):
             raise HTTPException(402, "Нет вращений. Купи набор в чате с ботом.")
@@ -774,6 +787,7 @@ async def spin(authorization: str|None=Header(default=None)):
         spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
                   (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
         spin_id = spin_cursor.lastrowid
+        c.execute("UPDATE users SET first_spin_at=COALESCE(first_spin_at, CURRENT_TIMESTAMP) WHERE telegram_id=?", (uid,))
     # Notify all configured admins about every win (including wins by admins).
     try:
         for admin_id in admin_ids_all():
@@ -911,6 +925,45 @@ async def create_payment_order(payload: dict, authorization: str|None=Header(def
         except Exception as e:
             print(f"Could not notify admin {admin_id} about order {oid}: {e}")
     return {"ok":True,"order_id":oid,"status":"pending","rub":final_rub,"discount_pct":discount_pct}
+
+@app.get("/api/admin/statistics")
+async def admin_statistics(authorization: str|None=Header(default=None)):
+    """Admin-only user acquisition and roulette activity statistics."""
+    require_admin(authorization)
+    with db() as c:
+        rows = c.execute("""
+            SELECT u.telegram_id, u.username, u.first_name, u.created_at,
+                   u.first_start_at, u.first_spin_at, u.spins AS balance,
+                   COUNT(s.id) AS total_spins, MIN(s.created_at) AS first_spin_from_history
+            FROM users u
+            LEFT JOIN spins s ON s.telegram_id = u.telegram_id
+            GROUP BY u.telegram_id, u.username, u.first_name, u.created_at,
+                     u.first_start_at, u.first_spin_at, u.spins
+            ORDER BY COALESCE(u.first_start_at, u.created_at) DESC
+            LIMIT 500
+        """).fetchall()
+        total_users = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        total_spins = c.execute("SELECT COUNT(*) AS n FROM spins").fetchone()["n"]
+        spun_users = c.execute("SELECT COUNT(DISTINCT telegram_id) AS n FROM spins").fetchone()["n"]
+    today = datetime.now(timezone.utc).date().isoformat()
+    new_today = 0
+    formatted = []
+    for row in rows:
+        item = dict(row)
+        first_start = item.get("first_start_at") or item.get("created_at")
+        first_spin = item.get("first_spin_at") or item.get("first_spin_from_history")
+        if first_start and str(first_start)[:10] == today:
+            new_today += 1
+        username = (item.get("username") or "").strip()
+        item["display_name"] = ("@" + username if username else (item.get("first_name") or "Без username"))
+        item["first_start_at"] = first_start
+        item["first_spin_at"] = first_spin
+        item["total_spins"] = int(item.get("total_spins") or 0)
+        formatted.append(item)
+    return {"total_users": int(total_users or 0), "new_today": new_today,
+            "spun_users": int(spun_users or 0), "total_spins": int(total_spins or 0),
+            "users": formatted}
+
 
 @app.get("/api/admin/overview")
 async def admin_overview(authorization: str|None=Header(default=None)):
@@ -1243,6 +1296,11 @@ async def start(m: Message):
                 pass
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (m.from_user.id,))
+        # Save the first observed /start timestamp once, and refresh Telegram profile fields.
+        c.execute(
+            "UPDATE users SET username=?, first_name=?, first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP) WHERE telegram_id=?",
+            (m.from_user.username, m.from_user.full_name, m.from_user.id),
+        )
         if inviter_id is not None:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (inviter_id,))
             c.execute("UPDATE users SET referred_by=? WHERE telegram_id=? AND referred_by IS NULL AND referral_paid=0", (inviter_id, m.from_user.id))
