@@ -1484,17 +1484,23 @@ async def claim_prize_for_user(uid: int, spin_id: int):
         # claimed=2 so they disappear from the pending "Мои призы" list.
         prize = c.execute("SELECT * FROM prizes WHERE id=?", (row["prize_id"],)).fetchone()
         prize_type = str((row["prize_type"] or (prize["prize_type"] if prize else "")) or "").lower()
-        if prize_type in {"spins", "spin", "bonus_spins"}:
-            label = str(row["prize_label"] or (prize["name"] if prize else "") or "")
-            amount = 0
-            if prize:
+        label = str(row["prize_label"] or (prize["name"] if prize else "") or "")
+        label_norm = label.lower().replace("ё", "е")
+        # Legacy/admin-created bonus rewards may incorrectly be stored as
+        # prize_type='points'. Detect them by their explicit label too.
+        is_spin_bonus = (
+            prize_type in {"spins", "spin", "bonus_spins"}
+            or ("вращени" in label_norm and re.search(r"\+?\s*\d+", label_norm) is not None)
+        )
+        if is_spin_bonus:
+            # The explicit +N in the label is authoritative for legacy rows.
+            match = re.search(r"\+?\s*(\d+)", label_norm)
+            amount = int(match.group(1)) if match else 0
+            if amount < 1 and prize:
                 try:
                     amount = int(prize["points"] or 0)
                 except (TypeError, ValueError):
                     amount = 0
-            if amount < 1:
-                match = re.search(r"\\+?\\s*(\\d+)", label)
-                amount = int(match.group(1)) if match else 0
             if amount < 1:
                 return False, "Не удалось определить количество бонусных вращений. Напиши администратору."
             update = c.execute(
