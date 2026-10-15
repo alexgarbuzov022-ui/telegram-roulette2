@@ -147,6 +147,7 @@ def init_db():
         add_column_if_missing(c, "users", "username", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "users", "first_name", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "users", "first_start_at", "TEXT DEFAULT NULL")
+        add_column_if_missing(c, "users", "first_miniapp_at", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "users", "first_spin_at", "TEXT DEFAULT NULL")
         add_column_if_missing(c, "spins", "prize_type", "TEXT NOT NULL DEFAULT 'points'")
         add_column_if_missing(c, "spins", "delivery_value", "TEXT DEFAULT ''")
@@ -263,6 +264,43 @@ def admin_ids_all():
     except Exception: pass
     return ids
 
+async def notify_admins_new_user(channel, telegram_id, username=None, first_name=None):
+    username_text = f"@{username}" if username else "не указан"
+    name_text = first_name or "не указано"
+    message = (
+        "🆕 Первый вход пользователя\\n\\n"
+        f"📍 Способ: {channel}\\n"
+        f"👤 Имя: {name_text}\\n"
+        f"🔗 Username: {username_text}\\n"
+        f"🆔 Telegram ID: {telegram_id}"
+    )
+    for admin_id in admin_ids_all():
+        try:
+            await bot.send_message(admin_id, message)
+        except Exception as exc:
+            print(f"Не удалось отправить уведомление админу {admin_id}: {exc}")
+
+
+async def notify_admins_star_payment(user, total_amount, spins_added):
+    username = getattr(user, "username", None)
+    username_text = f"@{username}" if username else "не указан"
+    first_name = getattr(user, "full_name", None) or "не указано"
+    paid_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    message = (
+        "⭐ Успешная оплата Telegram Stars\\n\\n"
+        f"👤 Имя: {first_name}\\n"
+        f"🔗 Username: {username_text}\\n"
+        f"🆔 Telegram ID: {user.id}\\n"
+        f"💰 Сумма: {total_amount} ⭐\\n"
+        f"🎟 Начислено вращений: {spins_added}\\n"
+        f"🕒 Время: {paid_at}"
+    )
+    for admin_id in admin_ids_all():
+        try:
+            await bot.send_message(admin_id, message)
+        except Exception as exc:
+            print(f"Не удалось отправить уведомление об оплате админу {admin_id}: {exc}")
+
 def is_admin(uid):
     if uid in ADMIN_IDS: return True
     with db() as c:
@@ -371,12 +409,30 @@ async def uploaded(filename: str):
 @app.get("/api/me")
 async def me(authorization: str|None=Header(default=None)):
     uid = uid_from_header(authorization)
+    tg_user = validate_init_data(authorization[4:])
+    first_miniapp_visit = False
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (uid,))
+        lock_suffix = " FOR UPDATE" if USE_POSTGRES else ""
+        before = c.execute("SELECT first_miniapp_at FROM users WHERE telegram_id=?" + lock_suffix, (uid,)).fetchone()
+        first_miniapp_visit = not before or not before["first_miniapp_at"]
+        c.execute(
+            "UPDATE users SET username=COALESCE(?, username), first_name=COALESCE(?, first_name), first_miniapp_at=COALESCE(first_miniapp_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?"
+            if USE_POSTGRES else
+            "UPDATE users SET username=COALESCE(?, username), first_name=COALESCE(?, first_name), first_miniapp_at=COALESCE(first_miniapp_at, CURRENT_TIMESTAMP) WHERE telegram_id=?",
+            (tg_user.get("username") or None, " ".join(x for x in (tg_user.get("first_name"), tg_user.get("last_name")) if x).strip() or None, uid),
+        )
         u = c.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
         hist = c.execute("SELECT prize_label,rarity,image,created_at,prize_type,claimed FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 30", (uid,)).fetchall()
         pays = c.execute("SELECT total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20", (uid,)).fetchall()
         referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (uid,)).fetchone()["n"]
+    if first_miniapp_visit:
+        await notify_admins_new_user(
+            "первый вход через Mini App",
+            uid,
+            tg_user.get("username"),
+            " ".join(x for x in (tg_user.get("first_name"), tg_user.get("last_name")) if x).strip(),
+        )
     bot_info = await bot.get_me()
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     spin_discount_pct = int(u["spin_discount_pct"] or 0)
@@ -1296,6 +1352,9 @@ async def start(m: Message):
                 pass
     with db() as c:
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (m.from_user.id,))
+        lock_suffix = " FOR UPDATE" if USE_POSTGRES else ""
+        before = c.execute("SELECT first_start_at FROM users WHERE telegram_id=?" + lock_suffix, (m.from_user.id,)).fetchone()
+        first_start_visit = not before or not before["first_start_at"]
         # Save the first observed /start timestamp once, and refresh Telegram profile fields.
         c.execute(
             "UPDATE users SET username=COALESCE(?, username), first_name=COALESCE(?, first_name), first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?",
@@ -1304,6 +1363,13 @@ async def start(m: Message):
         if inviter_id is not None:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (inviter_id,))
             c.execute("UPDATE users SET referred_by=? WHERE telegram_id=? AND referred_by IS NULL AND referral_paid=0", (inviter_id, m.from_user.id))
+    if first_start_visit:
+        await notify_admins_new_user(
+            "первый запуск через /start",
+            m.from_user.id,
+            m.from_user.username,
+            m.from_user.full_name,
+        )
     me = await bot.get_me()
     referral_link = f"https://t.me/{me.username}?start=ref_{m.from_user.id}"
     await m.answer("🎰 Добро пожаловать! Открой приложение — там можно крутить рулетку, смотреть профиль и покупать вращения.\n\n"
@@ -1780,6 +1846,8 @@ async def paid(m: Message):
         else:
             inviter_id = None
     await notify_referral_reward(inviter_id, uid)
+    if cur.rowcount and p.currency == "XTR":
+        await notify_admins_star_payment(m.from_user, p.total_amount, n)
     # Баланс обновится в Mini App; пригласивший получит уведомление о бонусе.
 
 async def main():
