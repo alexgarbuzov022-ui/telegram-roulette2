@@ -1589,10 +1589,12 @@ async def promo_result(m: Message):
 
 @dp.message(Command("promo_confirm"))
 async def promo_confirm(m: Message):
-    """Admin-only final confirmation; send each winner their prize notice once."""
+    """Admin-only delivery with a claim lock and per-winner retry tracking."""
     if not m.from_user or not is_admin(m.from_user.id):
         await m.answer("⛔ Эта команда доступна только администратору.")
         return
+
+    # Claim the draw atomically so two admins/clicks cannot start two broadcasts.
     with db() as c:
         draw = c.execute("SELECT * FROM promo_draws WHERE event_key=?", (PROMO_EVENT_KEY,)).fetchone()
         if not draw:
@@ -1601,24 +1603,58 @@ async def promo_confirm(m: Message):
         if draw["status"] == "confirmed":
             await m.answer("Результаты уже подтверждены. Повторно сообщения не отправляю.")
             return
-        winners=json.loads(draw["winners_json"] or "[]")
-        c.execute("UPDATE promo_draws SET status='confirmed',confirmed_by=?,confirmed_at=CURRENT_TIMESTAMP WHERE event_key=? AND status='awaiting_confirmation'", (m.from_user.id,PROMO_EVENT_KEY))
-    sent=[]; failed=[]
+        if draw["status"] == "sending":
+            await m.answer("Рассылка уже выполняется. Подожди завершения и проверь /promo_result.")
+            return
+        winners = json.loads(draw["winners_json"] or "[]")
+        claim = c.execute(
+            "UPDATE promo_draws SET status='sending',confirmed_by=?,confirmed_at=CURRENT_TIMESTAMP "
+            "WHERE event_key=? AND status='awaiting_confirmation'",
+            (m.from_user.id, PROMO_EVENT_KEY),
+        )
+        if claim.rowcount != 1:
+            await m.answer("Не удалось начать рассылку: статус жеребьёвки уже изменился. Проверь /promo_result.")
+            return
+
+    sent = []
+    failed = []
     for w in winners:
-        msg=(f"🎉 Поздравляем! Ты выиграл(а) в конкурсе!\n\n🎁 Твой приз: {w['prize']}\n\nЧтобы получить приз, напиши в личные сообщения @XDarryanaX.")
+        # Successful deliveries are saved immediately, so a normal retry only
+        # attempts recipients who have not yet received their notification.
+        if w.get("notified"):
+            continue
+        msg = (f"🎉 Поздравляем! Ты выиграл(а) в конкурсе!\n\n"
+               f"🎁 Твой приз: {w['prize']}\n\n"
+               "Чтобы получить приз, напиши в личные сообщения @XDarryanaX.")
         try:
             await bot.send_message(int(w["telegram_id"]), msg)
+            w["notified"] = True
             sent.append(w)
+            with db() as c:
+                c.execute("UPDATE promo_draws SET winners_json=? WHERE event_key=? AND status='sending'",
+                          (json.dumps(winners, ensure_ascii=False), PROMO_EVENT_KEY))
         except Exception as exc:
             failed.append((w, str(exc)[:160]))
-    audit(m.from_user.id,"promo_confirm",f"sent={len(sent)}; failed={len(failed)}; event={PROMO_EVENT_KEY}")
-    lines=["📨 <b>Рассылка результатов конкурса завершена</b>",f"Успешно отправлено: {len(sent)}",f"Не удалось отправить: {len(failed)}"]
-    if failed:
-        lines.append("\nНе удалось написать этим победителям (возможно, они не запускали бота):")
-        for w,err in failed:
-            lines.append(f"ID <code>{w['telegram_id']}</code> — {html.escape(err)}")
-    await m.answer("\n".join(lines),parse_mode="HTML")
 
+    final_status = "awaiting_confirmation" if failed else "confirmed"
+    with db() as c:
+        c.execute(
+            "UPDATE promo_draws SET status=?,confirmed_by=?,confirmed_at=? WHERE event_key=? AND status='sending'",
+            (final_status, m.from_user.id if not failed else None,
+             datetime.now(timezone.utc).isoformat() if not failed else None, PROMO_EVENT_KEY),
+        )
+    audit(m.from_user.id, "promo_confirm", f"sent={len(sent)}; failed={len(failed)}; event={PROMO_EVENT_KEY}")
+    lines = ["📨 <b>Рассылка результатов конкурса завершена</b>",
+             f"Успешно отправлено сейчас: {len(sent)}",
+             f"Ранее отправлено: {sum(1 for w in winners if w.get('notified')) - len(sent)}",
+             f"Не удалось отправить: {len(failed)}"]
+    if failed:
+        lines.append("\nНе удалось написать этим победителям (возможно, они не запускали бота). Можно повторить /promo_confirm после проверки:")
+        for w, err in failed:
+            lines.append(f"ID <code>{w['telegram_id']}</code> — {html.escape(err)}")
+    elif not sent:
+        lines.append("Все уведомления уже были отмечены как отправленные; повторной рассылки не было.")
+    await m.answer("\n".join(lines), parse_mode="HTML")
 
 @dp.message(F.text == "🎟 Купить вращения")
 async def menu_buy(m: Message):
