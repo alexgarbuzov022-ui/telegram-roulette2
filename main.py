@@ -1,4 +1,4 @@
-import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re, html
+import asyncio, hashlib, hmac, json, os, secrets, sqlite3, time, uuid, re, html, csv, io
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
@@ -803,9 +803,24 @@ async def spin(authorization: str|None=Header(default=None)):
             if draw < acc:
                 chosen = prize_row
                 break
-        if chosen["prize_type"] == "spins":
-            bonus_spins = max(0, int(chosen["points"] or 0))
-            c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
+        chosen_type = str(chosen["prize_type"] or "").strip().lower()
+        chosen_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
+        # Some prizes were saved with type="points" even though their name says
+        # "+N вращений". Detect that legacy/admin setup instead of crediting points.
+        spin_label_match = re.search(r"\+?\s*(\d+)", chosen_name_norm)
+        label_says_spins = (
+            ("вращени" in chosen_name_norm or "спин" in chosen_name_norm)
+            and spin_label_match is not None
+        )
+        is_spin_bonus = chosen_type in {"spins", "spin", "bonus_spins"} or label_says_spins
+        if is_spin_bonus:
+            bonus_spins = int(spin_label_match.group(1)) if label_says_spins else max(0, int(chosen["points"] or 0))
+            # A normal spin is consumed even when the prize itself grants bonus spins.
+            # Admin spins are free and therefore are not deducted.
+            if admin_free:
+                c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
+            else:
+                c.execute("UPDATE users SET spins=spins-1+? WHERE telegram_id=?", (bonus_spins,uid))
         elif admin_free:
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
         else:
@@ -1436,6 +1451,67 @@ async def menu_profile(m: Message):
         await m.answer("Профиль пока пуст. Нажми /start.",reply_markup=reply_menu()); return
     await m.answer(f"👤 Твой профиль\nID: {m.from_user.id}\nВращений: {u['spins']}\nВыигрышей: {wins}\nПризов к получению: {pending}",reply_markup=reply_menu())
 
+@dp.message(Command("promo_participants"))
+async def promo_participants(m: Message):
+    """Export users who purchased spins and have at least one referred buyer."""
+    if not m.from_user or not is_admin(m.from_user.id):
+        await m.answer("⛔ Эта команда доступна только администратору.")
+        return
+
+    with db() as c:
+        rows = c.execute("""
+            SELECT u.telegram_id, u.username, u.first_name,
+                   (SELECT COUNT(*) FROM payments p WHERE p.telegram_id=u.telegram_id)
+                   +
+                   (SELECT COUNT(*) FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved')
+                     AS successful_purchases,
+                   (SELECT COUNT(*) FROM users r
+                    WHERE r.referred_by=u.telegram_id AND r.referral_paid=1)
+                     AS successful_referrals
+            FROM users u
+            WHERE (
+                EXISTS (SELECT 1 FROM payments p WHERE p.telegram_id=u.telegram_id)
+                OR EXISTS (SELECT 1 FROM orders o WHERE o.telegram_id=u.telegram_id AND o.status='approved')
+            )
+            AND EXISTS (SELECT 1 FROM users r
+                        WHERE r.referred_by=u.telegram_id AND r.referral_paid=1)
+            ORDER BY u.telegram_id
+        """).fetchall()
+        qualifying = []
+        for row in rows:
+            referrals = c.execute(
+                "SELECT telegram_id, username, first_name FROM users WHERE referred_by=? AND referral_paid=1 ORDER BY telegram_id",
+                (row["telegram_id"],),
+            ).fetchall()
+            qualifying.append((row, referrals))
+
+    if not qualifying:
+        await m.answer("Пока нет участников, которые сами совершили успешную покупку и привели хотя бы одного друга с подтверждённой покупкой.")
+        return
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["telegram_id", "username", "name", "successful_purchases", "successful_referrals", "referral_telegram_ids"])
+    for row, referrals in qualifying:
+        writer.writerow([
+            row["telegram_id"],
+            row["username"] or "",
+            row["first_name"] or "",
+            row["successful_purchases"],
+            row["successful_referrals"],
+            ",".join(str(ref["telegram_id"]) for ref in referrals),
+        ])
+
+    data = output.getvalue().encode("utf-8-sig")
+    document = BufferedInputFile(data, filename="promo_participants.csv")
+    await m.answer_document(
+        document,
+        caption=(f"✅ Подходящих участников: {len(qualifying)}\n"
+                 "Условия: участник сам совершил хотя бы одну подтверждённую покупку и привёл минимум одного друга, чья покупка подтверждена.\n"
+                 "Список включает всю историю базы данных, а не только конкретные даты акции."),
+    )
+
+
 @dp.message(F.text == "🎟 Купить вращения")
 async def menu_buy(m: Message):
     await m.answer("Покупка вращений находится внутри приложения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎰 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]]))
@@ -1800,20 +1876,41 @@ async def open_prize(cb):
             pass
         await cb.answer("Приз закрыт и убран из ожидающих: отправка не удалась.", show_alert=True)
 
-@dp.message(F.video | F.document)
+@dp.message(F.video_note | F.video | F.document)
 async def admin_video_file_id(m: Message):
-    if not is_admin(m.from_user.id): return
-    if m.video:
-        file_id=m.video.file_id
-        kind="видео"
-        size=m.video.file_size or 0
+    if not m.from_user or not is_admin(m.from_user.id):
+        return
+
+    if m.video_note:
+        file_id = m.video_note.file_id
+        kind = "кружок"
+        prize_type = "video_note"
+        size = m.video_note.file_size or 0
+        hint = "В админке выбери тип выдачи «Кружок» (video_note) и вставь file_id в «Содержимое приза»."
+    elif m.video:
+        file_id = m.video.file_id
+        kind = "видео"
+        prize_type = "video"
+        size = m.video.file_size or 0
+        hint = "В админке выбери тип выдачи «Видео» и вставь file_id в «Содержимое приза»."
     elif m.document and (m.document.mime_type or "").startswith("video/"):
-        file_id=m.document.file_id
-        kind="видеофайл"
-        size=m.document.file_size or 0
+        file_id = m.document.file_id
+        kind = "видеофайл"
+        prize_type = "video"
+        size = m.document.file_size or 0
+        hint = "В админке выбери тип выдачи «Видео» и вставь file_id в «Содержимое приза»."
     else:
         return
-    await m.answer(f"✅ {kind.capitalize()} принят. Добавь этот Telegram file_id в список видео приза (тип выдачи «Видео»). Для нескольких видео вставляй каждый file_id с новой строки или разделяй точкой с запятой.\n\n<code>{file_id}</code>\n\nРазмер: {size/1024/1024:.1f} МБ\nПри выигрыше бот случайно выберет нужное количество видео из списка и отправит их напрямую через Telegram.",parse_mode="HTML")
+
+    safe_file_id = html.escape(file_id)
+    await m.answer(
+        f"✅ {kind.capitalize()} принят!\n\n"
+        f"<code>{safe_file_id}</code>\n\n"
+        f"Тип приза: <b>{prize_type}</b>\n"
+        f"Размер: {size / 1024 / 1024:.1f} МБ\n\n"
+        f"{hint}\nБот отправит его через Telegram без загрузки на сервер.",
+        parse_mode="HTML",
+    )
 
 @dp.callback_query(F.data.startswith("payok:"))
 async def bot_approve_payment(callback):
