@@ -1509,6 +1509,32 @@ def promo_qualifying_participants(c):
     return qualifying
 
 
+@dp.message(Command("promo_check"))
+async def promo_check(m: Message):
+    """Admin-only preflight: validate contest SQL against the live database before the end date."""
+    if not m.from_user or not is_admin(m.from_user.id):
+        await m.answer("⛔ Эта команда доступна только администратору.")
+        return
+    try:
+        with db() as c:
+            qualifying = promo_qualifying_participants(c)
+    except Exception as exc:
+        # Return a short actionable database error; full details remain in Render logs.
+        print(f"promo_check failed: {type(exc).__name__}: {exc}")
+        await m.answer(
+            "❌ Проверка конкурса не прошла: ошибка при чтении участников из базы Neon.\n"
+            f"Тип ошибки: {type(exc).__name__}.\n"
+            "Открой Render → Logs и пришли строку promo_check failed."
+        )
+        return
+    await m.answer(
+        "✅ Проверка конкурса и запроса к Neon прошла успешно.\n"
+        f"Подходящих участников на текущий момент: {len(qualifying)}\n"
+        "Период конкурса: 16.11.2026 00:00 — 21.11.2026 13:00 МСК.\n"
+        "До окончания конкурса эта команда только проверяет базу и ничего не разыгрывает."
+    )
+
+
 @dp.message(Command("promo_participants"))
 async def promo_participants(m: Message):
     """Export contest-eligible participants for the fixed Moscow-time window."""
