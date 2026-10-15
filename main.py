@@ -787,7 +787,7 @@ async def spin(authorization: str|None=Header(default=None)):
         spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
                   (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
         spin_id = spin_cursor.lastrowid
-        c.execute("UPDATE users SET first_spin_at=COALESCE(first_spin_at, CURRENT_TIMESTAMP) WHERE telegram_id=?", (uid,))
+        c.execute("UPDATE users SET first_spin_at=COALESCE(first_spin_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?", (uid,))
     # Notify all configured admins about every win (including wins by admins).
     try:
         for admin_id in admin_ids_all():
@@ -1298,7 +1298,7 @@ async def start(m: Message):
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (m.from_user.id,))
         # Save the first observed /start timestamp once, and refresh Telegram profile fields.
         c.execute(
-            "UPDATE users SET username=?, first_name=?, first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP) WHERE telegram_id=?",
+            "UPDATE users SET username=?, first_name=?, first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?",
             (m.from_user.username, m.from_user.full_name, m.from_user.id),
         )
         if inviter_id is not None:
