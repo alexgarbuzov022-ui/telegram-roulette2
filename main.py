@@ -1298,8 +1298,8 @@ async def start(m: Message):
         c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (m.from_user.id,))
         # Save the first observed /start timestamp once, and refresh Telegram profile fields.
         c.execute(
-            "UPDATE users SET username=?, first_name=?, first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?",
-            (m.from_user.username, m.from_user.full_name, m.from_user.id),
+            "UPDATE users SET username=COALESCE(?, username), first_name=COALESCE(?, first_name), first_start_at=COALESCE(first_start_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?",
+            (m.from_user.username or None, m.from_user.full_name or None, m.from_user.id),
         )
         if inviter_id is not None:
             c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES(?)", (inviter_id,))
