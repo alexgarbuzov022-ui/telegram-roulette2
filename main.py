@@ -265,39 +265,41 @@ def admin_ids_all():
     return ids
 
 async def notify_admins_new_user(channel, telegram_id, username=None, first_name=None):
-    username_text = f"@{username}" if username else "не указан"
-    name_text = first_name or "не указано"
+    username_text = f"@{html.escape(username)}" if username else "не указан"
+    name_text = html.escape(first_name or "Не указано")
     message = (
-        "🆕 Первый вход пользователя\\n\\n"
-        f"📍 Способ: {channel}\\n"
-        f"👤 Имя: {name_text}\\n"
-        f"🔗 Username: {username_text}\\n"
-        f"🆔 Telegram ID: {telegram_id}"
+        "🆕 <b>НОВЫЙ ПОЛЬЗОВАТЕЛЬ</b>\\n"
+        "━━━━━━━━━━━━━━━━━━\\n"
+        f"👤 <b>{name_text}</b>\\n"
+        f"🔗 {username_text}\\n"
+        f"🆔 <code>{telegram_id}</code>\\n\\n"
+        f"📍 <b>Первый вход:</b> {html.escape(channel)}"
     )
     for admin_id in admin_ids_all():
         try:
-            await bot.send_message(admin_id, message)
+            await bot.send_message(admin_id, message, parse_mode="HTML")
         except Exception as exc:
             print(f"Не удалось отправить уведомление админу {admin_id}: {exc}")
 
 
 async def notify_admins_star_payment(user, total_amount, spins_added):
     username = getattr(user, "username", None)
-    username_text = f"@{username}" if username else "не указан"
-    first_name = getattr(user, "full_name", None) or "не указано"
-    paid_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    username_text = f"@{html.escape(username)}" if username else "не указан"
+    first_name = html.escape(getattr(user, "full_name", None) or "Не указано")
+    paid_at = datetime.now(timezone.utc).strftime("%d.%m.%Y в %H:%M UTC")
     message = (
-        "⭐ Успешная оплата Telegram Stars\\n\\n"
-        f"👤 Имя: {first_name}\\n"
-        f"🔗 Username: {username_text}\\n"
-        f"🆔 Telegram ID: {user.id}\\n"
-        f"💰 Сумма: {total_amount} ⭐\\n"
-        f"🎟 Начислено вращений: {spins_added}\\n"
-        f"🕒 Время: {paid_at}"
+        "⭐ <b>НОВАЯ ОПЛАТА STARS</b>\\n"
+        "━━━━━━━━━━━━━━━━━━\\n"
+        f"👤 <b>{first_name}</b>\\n"
+        f"🔗 {username_text}\\n"
+        f"🆔 <code>{user.id}</code>\\n\\n"
+        f"💰 <b>Оплачено:</b> {total_amount} ⭐\\n"
+        f"🎟 <b>Начислено вращений:</b> {spins_added}\\n"
+        f"🕒 <b>Время:</b> {paid_at}"
     )
     for admin_id in admin_ids_all():
         try:
-            await bot.send_message(admin_id, message)
+            await bot.send_message(admin_id, message, parse_mode="HTML")
         except Exception as exc:
             print(f"Не удалось отправить уведомление об оплате админу {admin_id}: {exc}")
 
