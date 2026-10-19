@@ -888,8 +888,14 @@ async def spin(authorization: str|None=Header(default=None)):
             delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
             delivery_payload = ""
+        # Bonus-spin prizes are credited immediately above and have no media to open.
+        # Mark them as already handled so they do not appear as broken pending prizes.
+        if str(chosen["prize_type"] or "").lower() in {"spins", "spin", "bonus_spins"}:
+            claimed_state = 2
+        else:
+            claimed_state = 0 if delivery_payload.strip() else 1
         spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,claimed_state))
         spin_id = spin_cursor.lastrowid
         c.execute("UPDATE users SET first_spin_at=COALESCE(first_spin_at, CURRENT_TIMESTAMP::text) WHERE telegram_id=?", (uid,))
     # Notify all configured admins about every win (including wins by admins).
