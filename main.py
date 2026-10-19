@@ -2016,6 +2016,8 @@ async def open_prize(cb):
             for index, video_value in enumerate(video_values):
                 caption = f"🎉 Твой приз: {row['prize_label']}" if index == 0 else None
                 await bot.send_video(cb.from_user.id, video_value, caption=caption)
+        elif kind in {"voice", "audio_message", "голосовое", "гс"}:
+            await bot.send_voice(cb.from_user.id, value, caption=f"🎉 Твой приз: {row['prize_label']}")
         elif kind in {"video_note", "кружок"}:
             await bot.send_video_note(cb.from_user.id, value)
             await bot.send_message(cb.from_user.id, f"🎉 Твой приз: {row['prize_label']}\n\nЕсли это бонусный кружок, перешли сообщение с кружком в личку модели @XDarryanaX.")
@@ -2046,12 +2048,18 @@ async def open_prize(cb):
             pass
         await cb.answer("Приз закрыт и убран из ожидающих: отправка не удалась.", show_alert=True)
 
-@dp.message(F.video_note | F.video | F.document)
+@dp.message(F.voice | F.video_note | F.video | F.document)
 async def admin_video_file_id(m: Message):
     if not m.from_user or not is_admin(m.from_user.id):
         return
 
-    if m.video_note:
+    if m.voice:
+        file_id = m.voice.file_id
+        kind = "голосовое сообщение"
+        prize_type = "voice"
+        size = m.voice.file_size or 0
+        hint = "В админке выбери тип выдачи «Голосовое» (voice) и вставь file_id в «Содержимое приза»."
+    elif m.video_note:
         file_id = m.video_note.file_id
         kind = "кружок"
         prize_type = "video_note"
