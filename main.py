@@ -838,18 +838,26 @@ async def spin(authorization: str|None=Header(default=None)):
             media_type = str(item.get("type", "")).lower().strip()
             if media_type in {"image", "картинка", "фото"} or media_type.startswith("image/"):
                 media_type = "photo"
-            if media_type in {"видео"} or media_type.startswith("video/"):
+            elif media_type in {"видео"} or media_type.startswith("video/"):
                 media_type = "video"
-            if media_type in {"photo", "video"}:
+            elif media_type in {"кружок", "circle", "video-note", "videonote"}:
+                media_type = "video_note"
+            elif media_type in {"гс", "голосовое", "audio_message", "audio-message"}:
+                media_type = "voice"
+            if media_type in {"photo", "video", "video_note", "voice", "audio"}:
                 valid_media.append({"url": file_value, "type": media_type})
 
         # Telegram file_id values can also be pasted into the legacy "delivery_value"
         # field, one per line or separated by semicolons. Treat them as a candidate pool.
+        prize_type_norm = str(chosen["prize_type"] or "").lower().strip()
+        wants_circle = "кружок" in prize_name_norm or prize_type_norm in {"video_note", "кружок", "circle", "video-note"}
+        wants_voice = any(term in prize_name_norm for term in ("голосовое", "гс модели", "голосовое сообщение")) or prize_type_norm in {"voice", "audio_message", "голосовое", "гс"}
         wants_video = (
             "видео" in prize_name_norm or "video" in prize_name_norm
-            or str(chosen["prize_type"] or "").lower() in {"video", "видео"}
-        )
-        if not valid_media and wants_video and delivery_payload:
+            or prize_type_norm in {"video", "видео"}
+        ) and not wants_circle
+        desired_media_type = "video_note" if wants_circle else ("voice" if wants_voice else ("video" if wants_video else "photo"))
+        if not valid_media and (wants_video or wants_circle or wants_voice) and delivery_payload:
             raw_candidates = []
             try:
                 parsed_delivery = json.loads(delivery_payload)
@@ -861,29 +869,34 @@ async def spin(authorization: str|None=Header(default=None)):
                 for item in raw_candidates:
                     if isinstance(item, dict):
                         file_value = str(item.get("url") or item.get("file_id") or "").strip()
-                        media_type = str(item.get("type") or "video").lower().strip()
-                        if file_value and media_type in {"video", "видео"}:
-                            valid_media.append({"url": file_value, "type": "video"})
+                        media_type = str(item.get("type") or desired_media_type).lower().strip()
+                        aliases = {"кружок": "video_note", "circle": "video_note", "video-note": "video_note", "гс": "voice", "голосовое": "voice", "audio_message": "voice", "видео": "video"}
+                        media_type = aliases.get(media_type, media_type)
+                        if file_value and media_type in {"video", "video_note", "voice", "audio"}:
+                            valid_media.append({"url": file_value, "type": media_type})
             else:
                 candidates = [part.strip() for line in delivery_payload.splitlines() for part in line.split(";") if part.strip()]
-                valid_media = [{"url": item, "type": "video"} for item in candidates]
+                valid_media = [{"url": item, "type": desired_media_type} for item in candidates]
 
         if valid_media:
-            # Choose exactly the requested number of unique entries at random.
-            matching = [m for m in valid_media if m["type"] == ("video" if wants_video else "photo")]
+            # A single circle or voice prize must pick ONE random item from its pool.
+            # Photo/video packs pick the count specified in the prize name.
+            matching = [m for m in valid_media if m["type"] == desired_media_type or (desired_media_type == "voice" and m["type"] == "audio")]
             if matching:
                 valid_media = matching
             else:
-                raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа ({'видео' if wants_video else 'фото'}).")
-            # Deduplicate repeated IDs so one video is not sent twice in the same pack.
+                type_label = {"video_note": "кружок", "voice": "голосовое", "video": "видео", "photo": "фото"}.get(desired_media_type, desired_media_type)
+                raise HTTPException(400, f"Для приза «{chosen['name']}» не прикреплены файлы нужного типа ({type_label}).")
             unique_media = list({(m["type"], m["url"]): m for m in valid_media}.values())
-            if len(unique_media) < wanted_count:
-                raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {wanted_count} разных файлов, прикреплено {len(unique_media)} подходящих.")
-            valid_media = secrets.SystemRandom().sample(unique_media, wanted_count)
+            pick_count = 1 if desired_media_type in {"video_note", "voice"} else wanted_count
+            if len(unique_media) < pick_count:
+                raise HTTPException(400, f"Для приза «{chosen['name']}» нужно {pick_count} подходящих файлов, прикреплено {len(unique_media)}.")
+            valid_media = secrets.SystemRandom().sample(unique_media, pick_count)
             delivery_payload = json.dumps({"media_files": valid_media}, ensure_ascii=False)
-        elif wants_video:
-            # Never substitute the prize-card image for a missing video.
-            raise HTTPException(400, f"Для видеоприза «{chosen['name']}» добавь Telegram file_id видео в список медиа или в поле «Содержимое приза».")
+        elif wants_video or wants_circle or wants_voice:
+            # Never substitute a card image or raw ID text for a missing media prize.
+            type_label = "кружок" if wants_circle else ("голосовое" if wants_voice else "видео")
+            raise HTTPException(400, f"Для приза «{chosen['name']}» добавь Telegram file_id ({type_label}) в список медиа или в поле «Содержимое приза».")
         elif str(chosen["image"] or "").strip() and delivery_payload in {"", "[]", "{}", "null"}:
             delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
@@ -1128,6 +1141,10 @@ async def save_prize(payload: dict, authorization: str|None=Header(default=None)
             media_type = "photo"
         elif raw_type in {"video", "видео"} or raw_type.startswith("video/"):
             media_type = "video"
+        elif raw_type in {"кружок", "circle", "video-note", "videonote"}:
+            media_type = "video_note"
+        elif raw_type in {"гс", "голосовое", "audio_message", "audio-message"}:
+            media_type = "voice"
         else:
             media_type = raw_type[:20]
         media_value = str(item.get("url") or item.get("file_id") or "").strip()
@@ -1797,15 +1814,21 @@ async def claim_prize_for_user(uid: int, spin_id: int):
                     existing_media = parsed_value["media_files"]
             except (ValueError, TypeError):
                 pass
-            kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
+            prize_kind = str(prize["prize_type"] or "").lower().strip()
+            if "кружок" in name_norm or prize_kind in {"video_note", "кружок", "circle", "video-note"}:
+                kind_wanted = "video_note"
+            elif any(term in name_norm for term in ("голосовое", "гс модели", "голосовое сообщение")) or prize_kind in {"voice", "audio_message", "голосовое", "гс"}:
+                kind_wanted = "voice"
+            else:
+                kind_wanted = "video" if "видео" in name_norm or "video" in name_norm else "photo"
             existing_matching = [x for x in existing_media if isinstance(x, dict) and x.get("url") and ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
             prize_media = []
             try:
                 prize_media = json.loads(prize["media_files"] or "[]")
             except (ValueError, TypeError):
                 prize_media = []
-            valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and x.get("type") in {"photo", "image", "video"}]
-            matching = [x for x in valid if ("photo" if x.get("type") == "image" else x.get("type")) == kind_wanted]
+            valid = [x for x in prize_media if isinstance(x, dict) and (x.get("url") or x.get("file_id")) and x.get("type") in {"photo", "image", "video", "video_note", "voice", "audio"}]
+            matching = [x for x in valid if ("photo" if x.get("type") == "image" else ("voice" if x.get("type") == "audio" else x.get("type"))) == kind_wanted]
             if matching:
                 valid = matching
 
@@ -1830,8 +1853,9 @@ async def claim_prize_for_user(uid: int, spin_id: int):
                 if not valid and not has_media_payload:
                     candidates = [part.strip() for line in raw_delivery.splitlines() for part in line.split(";") if part.strip()]
                     valid = [{"url": item, "type": "video"} for item in candidates]
-            if valid and (wanted > 1 or kind_wanted == "video"):
-                pick_count = min(wanted, len(valid)) if wanted > 1 else 1
+            if valid and (wanted > 1 or kind_wanted in {"video", "video_note", "voice"}):
+                # Circle and voice prizes always deliver exactly one random file.
+                pick_count = 1 if kind_wanted in {"video_note", "voice"} else min(wanted, len(valid))
                 chosen_media = secrets.SystemRandom().sample(valid, pick_count)
                 value = json.dumps({"media_files": chosen_media}, ensure_ascii=False)
             if not value:
@@ -1971,6 +1995,8 @@ async def open_prize(cb):
         if media_payload:
             photos = []
             videos = []
+            circles = []
+            voices = []
             for item in media_payload:
                 if not isinstance(item, dict):
                     continue
@@ -1982,8 +2008,16 @@ async def open_prize(cb):
                     photos.append(media_value)
                 elif media_type in {"video", "видео"} or media_type.startswith("video/"):
                     videos.append(media_value)
-            if not photos and not videos:
+                elif media_type in {"video_note", "кружок", "circle", "video-note", "videonote"}:
+                    circles.append(media_value)
+                elif media_type in {"voice", "audio", "audio_message", "голосовое", "гс"}:
+                    voices.append(media_value)
+            if not photos and not videos and not circles and not voices:
                 raise ValueError("В призе нет файлов для отправки")
+            for circle_value in circles[:1]:
+                await bot.send_video_note(cb.from_user.id, circle_value)
+            for voice_value in voices[:1]:
+                await bot.send_voice(cb.from_user.id, voice_value, caption=f"🎉 Твой приз: {row['prize_label']}")
             # Fetch web URLs in the bot process and upload bytes to Telegram. This avoids
             # Telegram being unable to fetch private/slow B2-backed media URLs itself.
             prepared_photos = []
