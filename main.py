@@ -1832,27 +1832,34 @@ async def claim_prize_for_user(uid: int, spin_id: int):
             if matching:
                 valid = matching
 
-            # For video prizes, media_files is the preferred pool. If none was
-            # uploaded, allow multiple Telegram file_ids / URLs in delivery_value,
-            # one per line or separated by semicolons. Select randomly per win.
+            # Media pools may be stored either in prizes.media_files or in
+            # delivery_value. For voice prizes, support JSON media_files and a
+            # plain list of Telegram file_ids separated by newlines/semicolons.
+            # Telegram file_ids are opaque strings: never split them on spaces.
             raw_delivery = str(prize["delivery_value"] or "").strip()
-            if kind_wanted == "video" and not valid and raw_delivery:
+            if kind_wanted in {"video", "voice", "video_note"} and not valid and raw_delivery:
                 has_media_payload = False
                 try:
                     parsed_delivery = json.loads(raw_delivery)
                     has_media_payload = isinstance(parsed_delivery, dict) and isinstance(parsed_delivery.get("media_files"), list)
                     if has_media_payload:
+                        aliases = {
+                            "video": {"video", "видео"},
+                            "voice": {"voice", "audio", "audio_message", "голосовое", "гс"},
+                            "video_note": {"video_note", "кружок", "circle", "video-note", "videonote"},
+                        }
                         valid = [
-                            {"url": str(x.get("url") or x.get("file_id") or "").strip(), "type": "video"}
+                            {"url": str(x.get("url") or x.get("file_id") or "").strip(), "type": kind_wanted}
                             for x in parsed_delivery["media_files"]
-                            if isinstance(x, dict) and str(x.get("url") or x.get("file_id") or "").strip()
-                            and str(x.get("type") or "video").lower() in {"video", "видео"}
+                            if isinstance(x, dict)
+                            and str(x.get("url") or x.get("file_id") or "").strip()
+                            and str(x.get("type") or kind_wanted).lower().strip() in aliases[kind_wanted]
                         ]
                 except (ValueError, TypeError):
                     pass
                 if not valid and not has_media_payload:
                     candidates = [part.strip() for line in raw_delivery.splitlines() for part in line.split(";") if part.strip()]
-                    valid = [{"url": item, "type": "video"} for item in candidates]
+                    valid = [{"url": item, "type": kind_wanted} for item in candidates]
             if valid and (wanted > 1 or kind_wanted in {"video", "video_note", "voice"}):
                 # Circle and voice prizes always deliver exactly one random file.
                 pick_count = 1 if kind_wanted in {"video_note", "voice"} else min(wanted, len(valid))
@@ -2075,18 +2082,18 @@ async def open_prize(cb):
         await cb.answer("Приз открыт!")
     except Exception as exc:
         print(f"Prize delivery failed for spin {spin_id}, user {cb.from_user.id}: {type(exc).__name__}: {exc}")
-        # The user asked not to leave broken gifts hanging in the pending list.
-        # Keep the history row for admins, but mark the gift unavailable/consumed.
+        # Failed Telegram delivery must not consume the prize. Make it pending
+        # again so the user can retry after the file_id/configuration is fixed.
         with db() as c:
-            c.execute("UPDATE spins SET claimed=3 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
+            c.execute("UPDATE spins SET claimed=1 WHERE id=? AND telegram_id=? AND claimed=2", (spin_id, cb.from_user.id))
         try:
-            await cb.message.edit_text("⚠️ Приз закрыт: не удалось отправить содержимое. Он убран из ожидающих; напиши администратору.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🎰 Крутить", web_app=WebAppInfo(url=WEBAPP_URL)),
+            await cb.message.edit_text("⚠️ Telegram не смог отправить приз. Приз сохранён — попробуй открыть ещё раз или обратись к администратору.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🎁 Открыть приз", callback_data=f"openprize:{spin_id}"),
                 InlineKeyboardButton(text="🎁 Мои призы", callback_data="myprizes")
             ]]))
         except Exception:
             pass
-        await cb.answer("Приз закрыт и убран из ожидающих: отправка не удалась.", show_alert=True)
+        await cb.answer("Отправка не удалась. Приз сохранён и не потерян.", show_alert=True)
 
 @dp.message(F.voice | F.video_note | F.video | F.document)
 async def admin_video_file_id(m: Message):
