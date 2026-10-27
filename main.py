@@ -696,8 +696,19 @@ async def spin(authorization: str|None=Header(default=None)):
             if draw < acc:
                 chosen = prize_row
                 break
-        if chosen["prize_type"] == "spins":
+        chosen_type = str(chosen["prize_type"] or "").strip().lower()
+        chosen_name_norm = str(chosen["name"] or "").lower().replace("ё", "е")
+        is_spin_bonus = chosen_type in {"spins", "spin", "вращения", "дополнительные вращения"} or (
+            ("вращ" in chosen_name_norm or "spin" in chosen_name_norm) and
+            ("доп" in chosen_name_norm or "+" in chosen_name_norm or chosen_type == "spins")
+        )
+        if is_spin_bonus:
+            qty_match = re.search(r"(?:\+\s*)?(\d+)\s*(?:дополнительн\w*\s*)?(?:вращ\w*|spin\w*)", chosen_name_norm)
             bonus_spins = max(0, int(chosen["points"] or 0))
+            if qty_match:
+                bonus_spins = max(bonus_spins, int(qty_match.group(1)))
+            if bonus_spins <= 0:
+                raise HTTPException(500, f"У приза «{chosen['name']}» не задано количество дополнительных вращений")
             c.execute("UPDATE users SET spins=spins+? WHERE telegram_id=?", (bonus_spins,uid))
         elif admin_free:
             c.execute("UPDATE users SET points=points+? WHERE telegram_id=?", (chosen["points"],uid))
@@ -771,8 +782,9 @@ async def spin(authorization: str|None=Header(default=None)):
             delivery_payload = json.dumps({"media_files": [{"url": str(chosen["image"]).strip(), "type": "photo"}]}, ensure_ascii=False)
         elif delivery_payload in {"[]", "{}", "null"}:
             delivery_payload = ""
+        spin_claimed = 2 if is_spin_bonus else (0 if delivery_payload.strip() else 1)
         spin_cursor = c.execute("INSERT INTO spins(telegram_id,prize_id,prize_label,rarity,image,points_awarded,prize_type,delivery_value,claimed) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,0 if delivery_payload.strip() else 1))
+                  (uid,chosen["id"],chosen["name"],chosen["rarity"],chosen["image"],chosen["points"],chosen["prize_type"],delivery_payload,spin_claimed))
         spin_id = spin_cursor.lastrowid
     # Notify all configured admins about every win (including wins by admins).
     try:
@@ -925,6 +937,29 @@ async def admin_overview(authorization: str|None=Header(default=None)):
             "users":[dict(r) for r in users],"audit":[dict(r) for r in logs],
             "admins":[r["telegram_id"] for r in admins],"owner_ids":sorted(ADMIN_IDS),
             "payment_settings":{"card_details":get_setting("card_payment_details", CARD_PAYMENT_DETAILS),"ton_wallet":get_setting("ton_wallet_address", TON_WALLET_ADDRESS),"rub_per_star":int(get_setting("rub_per_star", str(RUB_PER_STAR)) or RUB_PER_STAR)}}
+
+@app.get("/api/admin/users/{telegram_id}")
+@app.get("/api/admin/user/{telegram_id}")
+async def admin_user_card(telegram_id: int, authorization: str|None=Header(default=None)):
+    """Full admin card for any Telegram user ID, including users outside the latest-100 list."""
+    admin_id = require_admin(authorization)
+    if telegram_id <= 0:
+        raise HTTPException(400, "Укажи корректный Telegram ID")
+    with db() as c:
+        user = c.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
+        if not user:
+            raise HTTPException(404, "Пользователь с таким ID не найден в базе")
+        wins = c.execute("SELECT id,prize_id,prize_label,rarity,image,points_awarded,prize_type,claimed,created_at FROM spins WHERE telegram_id=? ORDER BY id DESC LIMIT 100", (telegram_id,)).fetchall()
+        payments = c.execute("SELECT charge_id,total_amount,currency,spins_added,created_at FROM payments WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100", (telegram_id,)).fetchall()
+        orders = c.execute("SELECT id,method,status,details,created_at FROM orders WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100", (telegram_id,)).fetchall()
+        referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=?", (telegram_id,)).fetchone()["n"]
+        paid_referrals = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=? AND referral_paid=1", (telegram_id,)).fetchone()["n"]
+        pending_prizes = c.execute("SELECT COUNT(*) n FROM spins WHERE telegram_id=? AND claimed IN (0,1)", (telegram_id,)).fetchone()["n"]
+    audit(admin_id, "view_user_card", str(telegram_id))
+    return {"user": dict(user), "telegram_id": telegram_id,
+            "stats": {"wins": len(wins), "pending_prizes": pending_prizes, "referrals": referrals, "paid_referrals": paid_referrals,
+                      "payments_count": len(payments), "orders_count": len(orders)},
+            "history": [dict(r) for r in wins], "payments": [dict(r) for r in payments], "orders": [dict(r) for r in orders]}
 
 @app.post("/api/admin/payment-settings")
 async def save_payment_settings(payload: dict, authorization: str|None=Header(default=None)):
